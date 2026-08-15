@@ -273,6 +273,27 @@ export default function (app, ctx) {
     return c.json({ ok: true, backups: listBackups(ctx.dataDir) });
   });
 
+  // DEBUG: 探针 ctx.dataDir + backups 解析详情
+  app.get('/api/debug/data-dir', (c) => {
+    const fs2 = require('node:fs');
+    const path2 = require('node:path');
+    const dataDir = ctx.dataDir;
+    const backupRoot = dataDir ? path2.join(dataDir, 'backups') : null;
+    const exists = backupRoot ? fs2.existsSync(backupRoot) : null;
+    let entries = null;
+    if (exists) {
+      try { entries = fs2.readdirSync(backupRoot); } catch (e) { entries = `ERR: ${e.message}`; }
+    }
+    return c.json({
+      ctxKeys: Object.keys(ctx),
+      dataDir,
+      backupRoot,
+      exists,
+      entries,
+      entriesCount: Array.isArray(entries) ? entries.length : null,
+    });
+  });
+
   // 解析用户命令（dry-run 预览用，不实际执行）
   app.post('/api/parse-cmd', async (c) => {
     const { command } = await c.req.json();
