@@ -31,6 +31,9 @@ import {
   backupProfile,
   restoreProfile,
   listBackups,
+  updateBackupNote,
+  deleteBackup,
+  cleanupOldBackups,
 } from '../lib/backup.js';
 import {
   pnpmAvailable,
@@ -271,6 +274,52 @@ export default function (app, ctx) {
   // 列出备份
   app.get('/api/backups', (c) => {
     return c.json({ ok: true, backups: listBackups(ctx.dataDir) });
+  });
+
+  // 手动备份当前 profile（命名规则与自动备份一致：YYYYMMDD-HHmmss-profile）
+  app.post('/api/backup', async (c) => {
+    const { profile } = await c.req.json();
+    const dshHome = resolveDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
+    }
+    try {
+      const backupDir = backupProfile(ctx.dataDir, dshHome, profile, true); // manual = true
+      // 上限 10 条，超了从最早的开始删
+      const removed = cleanupOldBackups(ctx.dataDir, 10);
+      appendLog(ctx.dataDir, { action: 'backup.manual', profile, backupDir, ok: true, removed });
+      return c.json({ ok: true, backupDir, removed });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // 更新备份备注
+  app.post('/api/backup/note', async (c) => {
+    const { backupDir, note } = await c.req.json();
+    if (!backupDir) return c.json({ ok: false, error: 'backupDir 缺失' }, 400);
+    try {
+      const ok = updateBackupNote(backupDir, note);
+      if (!ok) return c.json({ ok: false, error: '备份目录不存在' }, 400);
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // 删除备份（含磁盘目录）
+  app.post('/api/backup/delete', async (c) => {
+    const { backupDir } = await c.req.json();
+    if (!backupDir) return c.json({ ok: false, error: 'backupDir 缺失' }, 400);
+    try {
+      const ok = deleteBackup(backupDir);
+      if (!ok) return c.json({ ok: false, error: '备份目录不存在或删除失败' }, 400);
+      appendLog(ctx.dataDir, { action: 'backup.delete', backupDir, ok: true });
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
   });
 
   // DEBUG: 探针 ctx.dataDir + backups 解析详情

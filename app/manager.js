@@ -783,29 +783,62 @@
     }).join('');
   }
 
+  // ── 自制确认框 ────────────────────────────────────
+  // iframe 沙箱里 window.confirm 被禁用（返回 undefined），必须用自绘确认层。
+  function uiConfirm(msg) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;' +
+        'display:flex;align-items:center;justify-content:center';
+      overlay.innerHTML = `
+        <div style="background:var(--bg-card,#fff);border:1px solid var(--border,#ddd);border-radius:12px;
+          padding:20px 24px;max-width:360px;box-shadow:0 8px 30px rgba(0,0,0,.25)">
+          <div style="font-size:14px;line-height:1.6;color:var(--text,#222);margin-bottom:16px">${esc(msg)}</div>
+          <div style="display:flex;justify-content:flex-end;gap:8px">
+            <button class="btn ghost" data-c="cancel">取消</button>
+            <button class="btn danger" data-c="ok">确认</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const done = (v) => { overlay.remove(); resolve(v); };
+      overlay.querySelector('[data-c="cancel"]').addEventListener('click', () => done(false));
+      overlay.querySelector('[data-c="ok"]').addEventListener('click', () => done(true));
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) done(false); });
+    });
+  }
+
   // ── 备份 modal ────────────────────────────────────
   async function openBackupsModal() {
     const r = await api('GET', '/api/backups');
     const m = $('modal');
     m.innerHTML = `
       <div class="modal" onclick="event.stopPropagation()">
-        <h3>🗄️ 备份列表</h3>
+        <h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span>🗄️ 备份列表</span>
+          <button class="btn sm" id="btn-manual-backup">＋ 手动备份</button>
+        </h3>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:12px">
-          每次 install/uninstall/toggle 前自动备份。可在此恢复。
+          每次 install/uninstall/toggle 前自动备份。最多保留 10 条，超出的最早备份自动删除。
         </div>
         <div id="backups-list" style="max-height:400px;overflow-y:auto">
           ${r.backups.length === 0 ? '<div class="empty">暂无备份</div>' : r.backups.map(b => `
             <div class="glass" style="margin-bottom:8px;padding:10px 14px">
-              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
                 <div style="flex:1;min-width:0">
                   <div style="font-weight:500;font-size:13px">${esc(b.name)}</div>
                   ${b.meta ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px">
-                    ${esc(b.meta.profile || '')} · ${esc(ts(b.meta.timestamp))}
+                    ${esc(b.meta.profile || '')} · ${esc(ts(b.meta.timestamp))}${b.meta.manual ? ' · 手动' : ' · 自动'}
                   </div>` : ''}
+                  <input type="text" class="backup-note" data-note-input="${esc(b.dir)}" placeholder="点击填写备注…"
+                    value="${esc((b.meta && b.meta.note) || '')}"
+                    style="width:100%;box-sizing:border-box;margin-top:6px;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input, transparent);color:var(--text)" />
                 </div>
-                <button class="btn sm danger" data-backup-action="restore" data-backup="${esc(b.dir)}" data-backup-meta='${esc(JSON.stringify(b.meta || {}))}'>
-                  恢复
-                </button>
+                <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+                  <button class="btn sm" data-backup-action="restore" data-backup="${esc(b.dir)}" data-backup-meta='${esc(JSON.stringify(b.meta || {}))}'>
+                    恢复
+                  </button>
+                  <button class="btn sm danger" data-backup-action="delete" data-backup="${esc(b.dir)}">删除</button>
+                </div>
               </div>
             </div>
           `).join('')}
@@ -816,14 +849,54 @@
       </div>
     `;
     m.classList.add('show');
+    // 用命名函数 + removeEventListener 避免多次打开时监听器累积
+    m.removeEventListener('click', closeModal);
     m.addEventListener('click', closeModal);
 
+    // 手动备份当前 profile
+    $('btn-manual-backup').addEventListener('click', async () => {
+      const profName = STATE.currentProfile;
+      if (!profName) return toast('请先选择 profile', 'error');
+      const r = await api('POST', '/api/backup', { profile: profName });
+      if (r.ok) {
+        toast(r.removed > 0 ? `已备份，并自动清理了 ${r.removed} 条旧备份` : '已备份');
+        await openBackupsModal();
+        await loadLogs();
+      } else toast('备份失败：' + r.error, 'error');
+    });
+
+    // 备注输入：防抖保存（停止输入 600ms 后写）
+    m.querySelectorAll('[data-note-input]').forEach((input) => {
+      let t = null;
+      input.addEventListener('input', () => {
+        clearTimeout(t);
+        t = setTimeout(async () => {
+          const r = await api('POST', '/api/backup/note', { backupDir: input.dataset.noteInput, note: input.value });
+          if (!r.ok) toast('备注保存失败：' + r.error, 'error');
+        }, 600);
+      });
+    });
+
+    // 恢复 / 删除
     m.querySelectorAll('[data-backup-action]').forEach((btn) => {
       btn.addEventListener('click', async () => {
+        const action = btn.dataset.backupAction;
+        const backupDir = btn.dataset.backup;
+        if (action === 'delete') {
+          if (!(await uiConfirm('删除该备份（含磁盘文件）？此操作不可恢复。'))) return;
+          const r = await api('POST', '/api/backup/delete', { backupDir });
+          if (r.ok) {
+            toast('已删除备份');
+            await openBackupsModal();
+            await loadLogs();
+          } else toast('删除失败：' + r.error, 'error');
+          return;
+        }
+        // restore
         const meta = JSON.parse(btn.dataset.backupMeta || '{}');
         const profName = meta.profile || STATE.currentProfile;
-        if (!confirm(`从备份恢复到 profile「${profName}」？`)) return;
-        const r = await api('POST', '/api/restore', { backupDir: btn.dataset.backup, profile: profName });
+        if (!(await uiConfirm(`从备份恢复到 profile「${profName}」？`))) return;
+        const r = await api('POST', '/api/restore', { backupDir, profile: profName });
         if (r.ok) {
           toast('已恢复：' + r.restored.join(', '));
           closeModal();
