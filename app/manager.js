@@ -817,8 +817,12 @@
           <span>🗄️ 备份列表</span>
           <button class="btn sm" id="btn-manual-backup">＋ 手动备份</button>
         </h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:12px">
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;line-height:1.6">
           每次 install/uninstall/toggle 前自动备份。最多保留 10 条，超出的最早备份自动删除。
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:12px;padding:8px 10px;border-radius:6px;background:var(--bg-info, rgba(0,0,0,.04));line-height:1.55">
+          📦 <b>备份范围：仅 profile 配置文件</b>（package.json / cordis.yml / cordis.patch.yml / pnpm-workspace.yaml / pnpm-lock.yaml）。<br>
+          <span style="color:var(--text-faint,#888)">插件本体代码不备份——恢复后由 pnpm 按 package.json 重新拉取。</span>
         </div>
         <div id="backups-list" style="max-height:400px;overflow-y:auto">
           ${r.backups.length === 0 ? '<div class="empty">暂无备份</div>' : r.backups.map(b => `
