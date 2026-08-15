@@ -40,7 +40,7 @@ import {
 } from '../lib/pnpm-runner.js';
 import { extractAndInspect } from '../lib/zip-extractor.js';
 import { appendLog, readRecentLogs } from '../lib/operation-log.js';
-import { runDsh, getJob, parseDshCommand } from '../lib/cmd-runner.js';
+import { runDsh, getJob, parseDshCommand, resolveDshCmd } from '../lib/cmd-runner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.dirname(__dirname);
@@ -125,32 +125,119 @@ export default function (app, ctx) {
   app.get('/manager', (c) => renderShell(c, ctx));
   app.get('/page', (c) => renderShell(c, ctx));
 
-  // 状态缓存：dsh/pnpm 版本探测每次 spawn 要 ~200-400ms，缓存 60s 避免反复拉
+  // 状态缓存：探测 DSH_HOME 路径 + dsh web 服务端口。不 spawn dsh/pnpm 进程
+  // （spawn 跟 hana 进程 PATH 交接本来就脆弱，而且 install 动作现走 runDsh()）。
+  // 60s 缓存避免反复拉。
   let statusCache = { at: 0, data: null };
+  let statusCallCount = 0;
   async function getStatus() {
     const now = Date.now();
-    if (statusCache.data && now - statusCache.at < 60000) return statusCache.data;
-    const dshHome = resolveDshHome();
-    const pnpm = await pnpmAvailable();
-    let dshCmd = { ok: false };
-    try {
-      const { spawn } = await import('node:child_process');
-      const proc = spawn('dsh', ['--version'], {
-        shell: process.platform === 'win32',
-        windowsHide: true,
-      });
-      let out = '';
-      proc.stdout.on('data', (d) => { out += d.toString(); });
-      await new Promise((r) => proc.on('exit', r));
-      dshCmd = { ok: true, version: out.trim() };
-    } catch (e) {
-      dshCmd = { ok: false, error: e.message };
+    statusCallCount += 1;
+    const hit = !!(statusCache.data && now - statusCache.at < 60000);
+    const cacheAge = statusCache.data ? Math.floor((now - statusCache.at) / 1000) : null;
+    if (statusCache.data && now - statusCache.at < 60000) {
+      return { ...statusCache.data, _cache: { hit: true, age: cacheAge, calls: statusCallCount } };
     }
+    const dshHome = resolveDshHome();
+    const dshHomeExists = dshHome ? fs.existsSync(dshHome) : false;
+
+    // 并行探测：DSH web 服务 + dsh/npm 依赖 (allSettled 一个挂了不影响其他)。
+    // 每个探测都有 timeout + 错误监听，不会 hang。
+    const [web, cmd, pnpm] = await Promise.allSettled([
+      probeDshWeb(),
+      detectDshVersion(),
+      pnpmAvailable(),
+    ]);
+
     statusCache = {
       at: now,
-      data: { dshHome, dshHomeExists: dshHome ? fs.existsSync(dshHome) : false, dshCmd, pnpm, platform: process.platform },
+      data: {
+        dshHome,
+        dshHomeExists,
+        dshWeb: web.status === 'fulfilled' ? web.value : { ok: false, error: '探测异常' },
+        dshCmd: cmd.status === 'fulfilled' ? cmd.value : { ok: false, error: '探测异常' },
+        pnpm: pnpm.status === 'fulfilled' ? pnpm.value : { ok: false, error: '探测异常' },
+        platform: process.platform,
+      },
     };
-    return statusCache.data;
+    return { ...statusCache.data, _cache: { hit: false, age: 0, calls: statusCallCount } };
+  }
+
+  // 探测 dsh web host 是否在线（默认 3080，可逐个试 3080/3081/3082）。
+  // 走 dsh 官方 RPC：POST /api/host.describe（跟 dsh-hanako 的 probeHost 同构）。
+  // 之前用 GET /api/health 是错的——服务活着但 404（那只是端口活着，不代表 dsh host 就绪）。
+  async function probeDshWeb() {
+    const ports = [3080, 3081, 3082];
+    const tried = [];
+    for (const port of ports) {
+      try {
+        const url = `http://127.0.0.1:${port}/api/host.describe`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            type: 'client-request',
+            rpcId: 'probe-' + Date.now(),
+            method: 'host.describe',
+            payload: {},
+          }),
+          signal: AbortSignal.timeout(1500),
+        });
+        if (res.ok) {
+          let version = null;
+          try {
+            const body = await res.json();
+            // dsh host.describe RPC 返回 { type, rpcId, result: { ok, value: { version, ... } } }
+            version = body?.result?.value?.version || body?.data?.version || body?.version || null;
+          } catch { /* ignore */ }
+          return { ok: true, port, url, version };
+        }
+        tried.push(`${port}:HTTP ${res.status}`);
+      } catch (e) {
+        tried.push(`${port}:${e.name || 'error'}`);
+      }
+    }
+    return { ok: false, error: 'dsh web 未就绪', tried };
+  }
+
+  // 探测 dsh 命令版本。不听 'exit' 单独解决：必须 listen 'error' + timeout 兜底，
+  // 否则 spawn ENOENT 时 Promise 永远 hang，60s cache 永远走不到。
+  // 跟 cmd-runner.js 里 runDsh() 一样的约束。
+  async function detectDshVersion() {
+    const dshPath = resolveDshCmd();
+    if (!dshPath) {
+      return { ok: false, error: 'dsh command not found (npm prefix + PATH both empty)' };
+    }
+    try {
+      const { spawn } = await import('node:child_process');
+      return await new Promise((resolve) => {
+        const proc = spawn(dshPath, ['--version'], {
+          shell: process.platform === 'win32',
+          windowsHide: true,
+        });
+        let out = '';
+        let err = '';
+        proc.stdout.on('data', (d) => { out += d.toString(); });
+        proc.stderr.on('data', (d) => { err += d.toString(); });
+        const finish = (val) => {
+          clearTimeout(timer);
+          resolve(val);
+        };
+        const timer = setTimeout(() => {
+          try { proc.kill(); } catch { /* ignore */ }
+          finish({ ok: false, error: 'dsh --version timeout after 5s', stderr: err.slice(-300) });
+        }, 5000);
+        proc.on('error', (e) => {
+          finish({ ok: false, error: `[spawn error] ${e.code || ''} ${e.message || ''}`, path: dshPath });
+        });
+        proc.on('exit', (code) => {
+          if (code === 0) finish({ ok: true, version: out.trim(), path: dshPath });
+          else finish({ ok: false, error: `dsh --version exit ${code}`, stderr: err.slice(-300), path: dshPath });
+        });
+      });
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
   }
 
   // 状态总览（带缓存）

@@ -47,9 +47,17 @@
     const opt = { method, headers: { 'Content-Type': 'application/json' } };
     if (TOKEN) opt.headers['Authorization'] = 'Bearer ' + TOKEN;
     if (body) opt.body = JSON.stringify(body);
-    const r = await fetch(API + path, opt);
-    const text = await r.text();
-    try { return JSON.parse(text); } catch { return { ok: false, error: text }; }
+    // 10s 默认超时：fetch 不加 timeout 会一直 hang，window DOM 也就永远不更新
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    opt.signal = ctrl.signal;
+    try {
+      const r = await fetch(API + path, opt);
+      const text = await r.text();
+      try { return JSON.parse(text); } catch { return { ok: false, error: text || `HTTP ${r.status}` }; }
+    } finally {
+      clearTimeout(timer);
+    }
   }
   function fmtDuration(ms) {
     if (!ms) return '';
@@ -81,19 +89,31 @@
   }
 
   function render() {
+    // 状态条文本从 STATE.status 读（任何时候 render 都反映当前状态）
+    const s = STATE.status;
+    const dshHomeText = s?.dshHome
+      ? (s.dshHome + (s.dshHomeExists ? '' : ' (不存在!)'))
+      : '初次加载中…';
+    const dshWebHud = s?.dshWeb?.ok
+      ? `<span class="pulse"></span> dsh web :${esc(String(s.dshWeb.port))}${s.dshWeb.version ? ' ' + esc(s.dshWeb.version) : ''}`
+      : `<span class="pulse off"></span> dsh web ${s?.dshWeb ? '离线' : '检测中…'}`;
+    const pnpmHud = s?.pnpm?.ok
+      ? `<span class="pulse"></span> pnpm ${esc(s.pnpm.version)}`
+      : `<span class="pulse off"></span> pnpm ${s?.pnpm ? '不可用' : '检测中…'}`;
+
     $('root').innerHTML = `
       <div class="hdr">
         <h1>📦 DSH 插件管理</h1>
         <div class="rt">
-          <span id="status-dsh"></span>
-          <span id="status-pnpm"></span>
+          <span id="status-dsh">${dshWebHud}</span>
+          <span id="status-pnpm">${pnpmHud}</span>
         </div>
       </div>
 
       <div class="path-bar glass">
         <div class="path-info">
           <span class="path-label">DSH_HOME</span>
-          <span class="path-value" id="dsh-home">探测中…</span>
+          <span class="path-value" id="dsh-home">${esc(dshHomeText)}</span>
         </div>
         <div class="actions">
           <button class="btn sm" id="btn-refresh">🔄 刷新</button>
@@ -575,7 +595,11 @@
   // ── 状态/Profile/插件 ────────────────────────────
   async function loadAll() {
     try {
-      // 并行加载 status / profiles（status 要 spawn 进程可能 ~400ms，不阻塞 UI）
+      // 先 render（DOM 就绪），再调 loadStatus / loadProfiles。
+      // 之前 Promise.all([loadStatus, loadProfiles]) 在 render() 之前，
+      // loadStatus 里 $('dsh-home').textContent = ... 会拿到 null 静默抛错。
+      render();
+      // 并行加载 status / profiles（status 被设了 60s 后端缓存）
       await Promise.all([loadStatus(), loadProfiles()]);
       // profile 可能刚被选中、install panel 还显示“未选”——需要重渲染
       render();
@@ -592,23 +616,17 @@
   }
 
   async function loadStatus() {
-    const r = await api('GET', '/api/status');
-    STATE.status = r;
-    if (r.dshHome) {
-      STATE.dshHome = r.dshHome;
-      $('dsh-home').textContent = r.dshHome + (r.dshHomeExists ? '' : ' (不存在!)');
-    } else {
-      $('dsh-home').textContent = '(未配置)';
-    }
-    if (r.dshCmd?.ok) {
-      $('status-dsh').innerHTML = `<span class="pulse"></span> dsh ${esc(r.dshCmd.version)}`;
-    } else {
-      $('status-dsh').innerHTML = `<span class="pulse off"></span> dsh 不可用`;
-    }
-    if (r.pnpm?.ok) {
-      $('status-pnpm').innerHTML = `<span class="pulse"></span> pnpm ${esc(r.pnpm.version)}`;
-    } else {
-      $('status-pnpm').innerHTML = `<span class="pulse off"></span> pnpm 不可用`;
+    try {
+      console.log('[dsh-plugin-manager] loadStatus START');
+      const r = await api('GET', '/api/status?_t=' + Date.now());
+      console.log('[dsh-plugin-manager] /api/status response:', r);
+      STATE.status = r;
+      STATE.dshHome = r.dshHome || null;
+      // 不直接设 DOM（render() 重建会覆盖）。只更新 STATE。render() 会从 STATE 读。
+      // 主动 render 一次以保证状态条立刻反映新状态。
+      render();
+    } catch (e) {
+      console.error('[dsh-plugin-manager] loadStatus failed:', e);
     }
   }
 
