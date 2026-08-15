@@ -1,0 +1,52 @@
+{
+  "manifestVersion": 1,
+  "id": "dsh-plugin-manager",
+  "name": "DSH 插件管理",
+  "version": "0.1.0",
+  "description": "管理本机 DeepSeek Harness (DSH) 的 profile 插件：支持本地 zip/目录/npm/github 四种来源安装，自动接入 cordis 配置与 pnpm 依赖。",
+  "trust": "full-access",
+  "minAppVersion": "0.158.0",
+  "author": "码农",
+  "capabilities": [
+    "filesystem.read",
+    "filesystem.write"
+  ],
+  "sensitiveCapabilities": [
+    "filesystem.write"
+  ],
+  "ui": {
+    "hostCapabilities": [
+      "external.open",
+      "clipboard.writeText",
+      "sessionFile.open",
+      "resource.open",
+      "resource.pick",
+      "resource.requestAccess"
+    ]
+  },
+  "contributes": {
+    "page": {
+      "title": {
+        "zh": "DSH 插件",
+        "en": "DSH Plugins"
+      },
+      "icon": "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M12 2v6m0 0l-3-3m3 3l3-3'/><path d='M5 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-1'/><path d='M8 12h8'/></svg>",
+      "route": "/manager"
+    },
+    "configuration": {
+      "properties": {
+        "dshHome": {
+          "type": "string",
+          "default": "",
+          "title": "DSH_HOME 路径",
+          "description": "留空则自动探测 ~\\.dsh 或 ~/.config/dsh"
+        },
+        "registry": {
+          "type": "string",
+          "default": "https://registry.npmmirror.com",
+          "title": "pnpm install 使用的 registry"
+        }
+      }
+    }
+  }
+}

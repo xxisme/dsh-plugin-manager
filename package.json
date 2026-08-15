@@ -1,0 +1,12 @@
+{
+  "name": "dsh-plugin-manager",
+  "version": "0.1.0",
+  "description": "DSH 插件管理：管理本机 DeepSeek Harness profile 的插件",
+  "type": "module",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "smoke": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {}
+}
