@@ -62,6 +62,13 @@
       clearTimeout(timer);
     }
   }
+  function fmtSize(bytes) {
+    if (!bytes) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
   function fmtDuration(ms) {
     if (!ms) return '';
     if (ms < 1000) return ms + 'ms';
@@ -931,6 +938,46 @@
     $('plugins-content').querySelectorAll('[data-action]').forEach((btn) => {
       btn.addEventListener('click', () => handleAction(btn.dataset.action, btn.dataset.id));
     });
+
+    // 异步拉 external/ 孤儿目录提示（不阻塞主列表）
+    loadExternalOrphans(profileName);
+  }
+
+  async function loadExternalOrphans(profileName) {
+    const r = await api('GET', '/api/external/orphans?profile=' + encodeURIComponent(profileName));
+    const existing = document.getElementById('orphan-bar');
+    if (!r.ok || !r.orphans?.length) {
+      if (existing) existing.remove();
+      return;
+    }
+    const totalSize = r.orphans.reduce((s, o) => s + (o.size || 0), 0);
+    const bar = existing || document.createElement('div');
+    bar.id = 'orphan-bar';
+    bar.style.cssText = 'margin:10px 0;padding:10px 12px;border-radius:6px;background:rgba(255,193,7,.12);border-left:3px solid #b8860b;font-size:12px;line-height:1.7';
+    bar.innerHTML = `
+      🧹 external/ 有 <b>${r.orphans.length}</b> 个孤儿目录（约 ${fmtSize(totalSize)}）—— 未被任何依赖引用（zip 解压残留/还原快照/未清理的安装目录）
+      <button class="btn sm" id="btn-clean-orphans" style="margin-left:8px">查看并清理</button>
+    `;
+    // 插到 plugins-content 前面（幂等：节点移动）
+    const content = $('plugins-content');
+    content.parentElement.insertBefore(bar, content);
+    const btn = document.getElementById('btn-clean-orphans');
+    if (btn) btn.addEventListener('click', () => cleanExternalOrphans(r.orphans));
+  }
+
+  async function cleanExternalOrphans(orphans) {
+    const detail = orphans.map((o) => `  • ${o.entry}  (${fmtSize(o.size)}) — ${o.reason}`).join('\n');
+    if (!(await uiConfirm(`清理 external/ 下 ${orphans.length} 个孤儿目录？\n\n${detail}\n\n删除后不可恢复（不影响任何已装插件）。`))) return;
+    const r = await api('POST', '/api/external/clean', {
+      profile: STATE.currentProfile,
+      entries: orphans.map((o) => o.entry),
+    });
+    if (r.ok) {
+      toast(`已清理 ${r.removed?.length || 0} 个孤儿目录`);
+      loadExternalOrphans(STATE.currentProfile);
+    } else {
+      toast('清理失败：' + r.error, 'error');
+    }
   }
 
   // 来源标签映射：不同 installKind 显示不同 emoji + 中文
@@ -1041,12 +1088,24 @@
     } else if (action === 'uninstall') {
       if (!(await uiConfirm(`卸载插件 ${id}？\n会自动备份，可在「备份」里恢复。`))) return;
       const removeFiles = await uiConfirm('同时删除本地 link 文件吗？');
+      // 先扫描残留（不删），让用户决定是否深度清理
+      let deepClean = false;
+      try {
+        const scan = await api('POST', '/api/uninstall/scan', { profile: STATE.currentProfile, id });
+        if (scan.ok && scan.total > 0) {
+          const lines = [];
+          if (scan.residues.cas?.length) lines.push(`• node_modules/.pnpm/ 残留 ${scan.residues.cas.length} 项`);
+          if (scan.residues.runtime?.length) lines.push(`• ~/.dsh/runtime/ 缓存 ${scan.residues.runtime.length} 项`);
+          if (scan.residues.bypass?.length) lines.push(`• 旁路注册 ${scan.residues.bypass.length} 项（skills/mcp/plugins）`);
+          deepClean = await uiConfirm(`发现 ${scan.total} 处卸载残留：\n${lines.join('\n')}\n\n是否一并深度清理？`);
+        }
+      } catch (e) { /* scan 失败不阻断卸载 */ }
       showOutput({
         id: 'pending', status: 'running',
-        stdout: `⏳ 卸载 ${id}\n   profile: ${STATE.currentProfile}\n\n`, stderr: '',
+        stdout: `⏳ 卸载 ${id}${deepClean ? '（含深度清理）' : ''}\n   profile: ${STATE.currentProfile}\n\n`, stderr: '',
       });
       const r = await api('POST', '/api/uninstall', {
-        profile: STATE.currentProfile, id, removeFiles,
+        profile: STATE.currentProfile, id, removeFiles, deepClean,
       });
       if (r.job) {
         showOutput(r.job);
@@ -1056,6 +1115,9 @@
       }
       if (r.ok) {
         toast(`已卸载 ${id}`);
+        if (r.deepCleanResult?.removed?.length) {
+          toast(`深度清理了 ${r.deepCleanResult.removed.length} 处残留`, 'warn');
+        }
         await loadPlugins(STATE.currentProfile);
         await loadLogs();
       } else toast('卸载失败：' + r.error, 'error');

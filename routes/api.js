@@ -43,6 +43,12 @@ import { restorePlugins, restorePluginsExec, githubCommitOf } from '../lib/plugi
 import { checkZipReady } from '../lib/plugin-zip-check.js';
 import { analyzeGithubRepo } from '../lib/github-installer.js';
 import { autoApprovePnpmBuilds } from '../lib/pnpm-build-allow.js';
+import {
+  scanUninstallResidues,
+  scanExternalOrphans,
+  cleanResidues,
+  fmtSize,
+} from '../lib/plugin-uninstall.js';
 import { scanWorkspace, backupWorkspace } from '../lib/workspace.js';
 import { checkUpdates } from '../lib/updater.js';
 import { readMarks, isMarkedModified, setMark } from '../lib/plugin-marks.js';
@@ -736,8 +742,42 @@ export default function (app, ctx) {
   });
 
   // 卸载（直接调 dsh plugin remove）
+  // 先扫描残留（不删）：返回 5/6/7 落点清单，前端展示后让用户决定是否深度清理
+  app.post('/api/uninstall/scan', async (c) => {
+    const { profile, id } = await c.req.json();
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
+    }
+    if (!id) return c.json({ ok: false, error: 'id 必填' }, 400);
+    try {
+      // 尝试读插件自己的 package.json（拿 name 做变体匹配）
+      let packageJson = null;
+      const profDir = profileDirOf(dshHome, profile);
+      for (const cand of [
+        path.join(profDir, 'node_modules', id, 'package.json'),
+        path.join(profDir, 'external', id, 'package.json'),
+      ]) {
+        try {
+          if (fs.existsSync(cand)) packageJson = JSON.parse(fs.readFileSync(cand, 'utf8'));
+        } catch { /* ignore */ }
+      }
+      const residues = scanUninstallResidues({ dshHome, profile, id, packageJson });
+      const total = residues.cas.length + residues.runtime.length + residues.bypass.length;
+      appendLog(ctx.dataDir, {
+        action: 'uninstall.scan', profile, plugin: id, ok: true,
+        cas: residues.cas.length, runtime: residues.runtime.length,
+        bypass: residues.bypass.length, total,
+      });
+      return c.json({ ok: true, id, residues, total });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
   app.post('/api/uninstall', async (c) => {
-    const { profile, id, removeFiles } = await c.req.json();
+    const { profile, id, removeFiles, deepClean } = await c.req.json();
     const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     if (!profile || !profileExists(dshHome, profile)) {
@@ -763,12 +803,44 @@ export default function (app, ctx) {
         }
       }
 
+      // 深度清理：dsh remove 只保证 1–4 落点，5/6/7（CAS/runtime/旁路）残留手动清
+      let deepCleanResult = null;
+      if (deepClean && job.exitCode === 0) {
+        try {
+          // 重新扫描（remove 之后 lockfile 已更新，CAS 判断才准确）
+          let packageJson = null;
+          for (const cand of [
+            path.join(profDir, 'node_modules', id, 'package.json'),
+            path.join(profDir, 'external', id, 'package.json'),
+          ]) {
+            try {
+              if (fs.existsSync(cand)) packageJson = JSON.parse(fs.readFileSync(cand, 'utf8'));
+            } catch { /* ignore */ }
+          }
+          const residues = scanUninstallResidues({ dshHome, profile, id, packageJson });
+          deepCleanResult = cleanResidues({ residues });
+          // external/ 下该插件目录的残留（dsh remove 不删 external 源码，removeFiles 已删；
+          // 若没删，这里兜底扫孤儿）
+          const orphans = scanExternalOrphans({ dshHome, profile });
+          const myOrphans = orphans.filter((o) => o.entry === id || o.entry.includes(id));
+          if (myOrphans.length) {
+            const extra = cleanResidues({ residues: { external: myOrphans } });
+            deepCleanResult.removed.push(...extra.removed);
+            deepCleanResult.errors.push(...extra.errors);
+          }
+        } catch (e) {
+          ctx.log?.warn?.('deep clean failed', e.message);
+        }
+      }
+
       const ok = job.exitCode === 0;
       appendLog(ctx.dataDir, {
         action: 'uninstall',
         profile,
         plugin: id,
         removeFiles,
+        deepClean: !!deepClean,
+        deepCleanRemoved: deepCleanResult?.removed?.length || 0,
         ok,
         jobId: job.id,
         exitCode: job.exitCode,
@@ -776,9 +848,56 @@ export default function (app, ctx) {
         removedDir,
       });
 
-      return c.json({ ok, pluginName: id, backupDir, removedDir, job });
+      return c.json({
+        ok, pluginName: id, backupDir, removedDir, job,
+        deepCleanResult,
+        error: ok ? undefined : ((job.error && '[spawn error] ' + job.error) || job.stderr?.trim().slice(-500) || `exit ${job.exitCode}`),
+      });
     } catch (e) {
       ctx.log?.error?.('uninstall failed', e);
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // external/ 孤儿目录：列表 + 清理（不属于某个插件卸载流程，独立管理）
+  app.get('/api/external/orphans', (c) => {
+    const profile = c.req.query('profile');
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
+    }
+    try {
+      const orphans = scanExternalOrphans({ dshHome, profile });
+      return c.json({ ok: true, orphans });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  app.post('/api/external/clean', async (c) => {
+    const { profile, entries } = await c.req.json();
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
+    }
+    if (!Array.isArray(entries) || !entries.length) {
+      return c.json({ ok: false, error: 'entries 必填' }, 400);
+    }
+    try {
+      // 只允许删确认过的孤儿（用扫描结果兜底，防误删）
+      const orphans = scanExternalOrphans({ dshHome, profile });
+      const allowed = new Set(orphans.map((o) => o.path));
+      const targets = orphans.filter((o) => entries.includes(o.entry) && allowed.has(o.path));
+      if (!targets.length) return c.json({ ok: false, error: '没有可清理的孤儿目录' }, 400);
+      const r = cleanResidues({ residues: { external: targets } });
+      appendLog(ctx.dataDir, {
+        action: 'external.clean', profile, ok: true,
+        removed: r.removed.map((x) => x.entry),
+      });
+      return c.json({ ok: true, removed: r.removed, errors: r.errors });
+    } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
     }
   });
