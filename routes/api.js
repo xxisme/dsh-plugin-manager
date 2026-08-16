@@ -39,7 +39,7 @@ import {
 import { detectHomes, getCurrentDshHome, setCurrentDshHome, addCustomDshHome } from '../lib/homes.js';
 import { scanProfile } from '../lib/plugin-scanner.js';
 import { backupPlugins } from '../lib/plugin-backup.js';
-import { restorePlugins } from '../lib/plugin-restore.js';
+import { restorePlugins, restorePluginsExec } from '../lib/plugin-restore.js';
 import { scanWorkspace, backupWorkspace } from '../lib/workspace.js';
 import { checkUpdates } from '../lib/updater.js';
 import { readMarks, isMarkedModified, setMark } from '../lib/plugin-marks.js';
@@ -768,11 +768,45 @@ export default function (app, ctx) {
       const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
       const specs = index.plugins;
       const dryRun = apply !== true;
-      const results = restorePlugins(specs, path.join(backupRoot, 'plugins'), { dryRun });
-      if (!dryRun) {
-        appendLog(ctx.dataDir, { action: 'restore.v2', profile, backupRoot, ok: true });
+      if (dryRun) {
+        const results = restorePlugins(specs, path.join(backupRoot, 'plugins'), { dryRun });
+        return c.json({ ok: true, dryRun, results });
       }
-      return c.json({ ok: true, dryRun, results });
+      // 真实还原：pointer 执行 pnpm add，blob 复制 content + link 注册，全部注册到 bundles
+      const profDir = profileDirOf(dshHome, profile);
+      const pluginsRoot = path.join(backupRoot, 'plugins');
+      const externalDir = path.join(profDir, 'external');
+      const { addPackage } = await import('../lib/pnpm-runner.js');
+      const { addBundle } = await import('../lib/dsh-profile.js');
+      const { restoreBlobOne } = await import('../lib/plugin-restore.js');
+      const exec = {
+        // pnpm add（cwd=profile 目录，写入 package.json + lockfile）
+        async add(specStr) {
+          const j = await addPackage(specStr, profDir);
+          return { ok: j.exitCode === 0, error: j.exitCode === 0 ? null : ((j.stderr || '').slice(-400) || `exit ${j.exitCode}`) };
+        },
+        // 注册到 dsh.profile.bundles（不写 cordis insert——bundle 层已有，避免重复加载）
+        registerBundle(pkg) {
+          addBundle(dshHome, profile, { id: pkg, depsSpec: null });
+        },
+        // blob 目标：link 插件 → external/<pkg>；其他 → node_modules/<pkg>
+        targetDirFor(spec) {
+          return spec.installKind === 'link'
+            ? path.join(externalDir, spec.pkg.replace(/^@/, '').replace(/\//g, '__'))
+            : path.join(profDir, 'node_modules', spec.pkg);
+        },
+        // 复制 content 到目标
+        async copyBlob(spec, dst) {
+          const r = restoreBlobOne(spec, pluginsRoot, dst);
+          return r;
+        },
+      };
+      const r = await restorePluginsExec(specs, pluginsRoot, exec);
+      appendLog(ctx.dataDir, {
+        action: 'restore.v2', profile, backupRoot, ok: r.ok,
+        plugins: r.results.length, okCount: r.results.filter((x) => x.ok).length,
+      });
+      return c.json({ ok: true, dryRun: false, results: r.results, allOk: r.ok });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
     }

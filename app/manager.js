@@ -1255,8 +1255,18 @@
         <div style="font-size:11px;color:var(--text-faint,#888);margin-top:6px">blob 插件会覆盖目标目录；pointer 插件需在 profile 里跑 pnpm add。</div>
       `;
     } else {
-      const ok = r.results.filter(x => x.ok !== false).length;
-      el.innerHTML = `<div style="font-size:12px">✅ 已恢复 ${ok}/${r.results.length} 个插件。pointer 插件的 pnpm 命令仍需手动执行或后续安装。</div>`;
+      // 真实还原结果：ok===true 才算成功（pointer 现在会真正执行 pnpm add）
+      const okCount = r.results.filter((x) => x.ok === true).length;
+      const failList = r.results.filter((x) => x.ok !== true);
+      el.innerHTML = `
+        <div style="font-size:12px">${failList.length === 0 ? '✅' : '⚠️'} 已还原 ${okCount}/${r.results.length} 个插件</div>
+        <div style="font-size:11px;line-height:1.8;margin-top:6px">
+          ${r.results.map((x) => {
+            if (x.ok === true) return `<div style="color:#27ae60">✓ ${esc(x.pkg)}${x.restoredTo ? ' → ' + esc(x.restoredTo) : ''}</div>`;
+            return `<div style="color:#c0392b">✗ ${esc(x.pkg)}：${esc(x.error || '失败')}</div>`;
+          }).join('')}
+        </div>
+      `;
       loadV2History();
       if (STATE.currentProfile) loadPlugins(STATE.currentProfile);
     }
