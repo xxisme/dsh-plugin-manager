@@ -812,6 +812,7 @@
       'file':    { icon: '📁', label: 'file',    cls: 'local',   title: '本地文件' },
       'folder':  { icon: '📂', label: 'folder',  cls: 'local',   title: '本地目录' },
       'unknown': { icon: '❓', label: 'unknown', cls: 'unknown', title: '未知来源' },
+      'core':    { icon: '📦', label: 'core',    cls: 'core',    title: 'DSH 内置 bundle（跟随 dsh-hanako 主包版本，不需独立管理）' },
     };
     const m = map[p.source] || map['unknown'];
     return `<span class="tag ${m.cls}" title="${esc(m.title)}">${m.icon} ${m.label}</span>`;
@@ -864,13 +865,16 @@
         <div class="plugin-name">${esc(p.id)}</div>
         <div class="plugin-meta">${tags.join('')}</div>
         ${p.detail ? `<div class="plugin-detail"><code>${esc(p.detail)}</code></div>` : ''}
+        ${p.isCore ? '<div class="plugin-note" style="font-size:10px;color:var(--text-dim);margin:4px 0">⚙ 跟随 dsh-hanako 主包，不可独立管理</div>' : ''}
         <div class="plugin-actions">
+          ${p.isCore ? '<span style="font-size:11px;color:var(--text-dim)">DSH 内置</span>' : `
           <button class="btn sm" data-action="toggle" data-id="${esc(p.id)}">
             ${p.enabled ? '⏸ 禁用' : '▶ 启用'}
           </button>
           <button class="btn sm danger" data-action="uninstall" data-id="${esc(p.id)}">
             🗑 卸载
           </button>
+          `}
         </div>
       </div>
     `;
