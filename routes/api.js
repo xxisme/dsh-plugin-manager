@@ -916,27 +916,57 @@ export default function (app, ctx) {
 
       const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
       const profDir = profileDirOf(dshHome, profile);
-      // 先跑一次 update，看 stderr 是否提到 allowBuilds（pnpm 10+ 默认拒绝 GitHub 源包跑 build）
-      // 如果是，就自动 pnpm approve-builds --all 后重试。避免 pnpm-workspace.yaml 手动维护。
+      // 先跑一次 update，看输出是否提到 allowBuilds（pnpm 10+ 默认拒绝 GitHub 源包跑 build）
+      // 如果是，就自动批准 + 重试。避免 pnpm-workspace.yaml 手动维护。
       const firstJob = await runDsh(['plugin', '--profile', profile, 'update', pkg], { cwd: profDir });
-      const approveAndRetry = /allowBuilds allowlist|Ignored build scripts|approve-builds/i.test(firstJob.stderr || '');
+      // dsh 把 pnpm 输出写到 stdout（不是 stderr），所以要同时检查 stdout + stderr。
+      // 注意：pnpm 中文报错里的"allowBuilds"被包在中文双引号里（"allowBuilds" allowlist），
+      // 不能用 allowBuilds allowlist 这种粘合的正则。
+      const approveAndRetry = /allowBuilds|Ignored build scripts|approve-builds/i.test((firstJob.stderr || '') + (firstJob.stdout || ''));
       if (approveAndRetry) {
         ctx.log?.info?.('auto-approving pnpm builds and retrying', pkg);
-        const approveJob = await runDsh(['--filter', '.', 'approve-builds', '--all'], { cwd: profDir });
-        if (approveJob.exitCode === 0) {
-          const job2 = await runDsh(['plugin', '--profile', profile, 'update', pkg], { cwd: profDir });
-          const ok2 = job2.exitCode === 0;
-          appendLog(ctx.dataDir, {
-            action: 'update', profile, plugin: pkg, ok: ok2,
-            jobId: job2.id, exitCode: job2.exitCode, durationMs: job2.durationMs,
-            backupDir, autoApprovedBuilds: true,
-            stderrTail: job2.stderr?.slice(-2000), stdoutTail: job2.stdout?.slice(-2000),
-          });
-          return c.json({
-            ok: ok2, pkg, backupDir, job: job2, autoApprovedBuilds: true,
-            error: ok2 ? undefined : ((job2.error && '[spawn error] ' + job2.error) || job2.stderr?.trim().slice(-500) || `exit ${job2.exitCode}`),
-          });
+        // pnpm approve-builds 需要 lockfile 已更新才看得到 pending——update 失败时它会说 "no awaiting"。
+        // 所以同时手动 patch pnpm-workspace.yaml：给这个 pkg 加仓库通配 key（pnpm 11.11+ 匹配所有 commit）。
+        try {
+          const wsPath = path.join(profDir, 'pnpm-workspace.yaml');
+          if (fs.existsSync(wsPath)) {
+            let text = fs.readFileSync(wsPath, 'utf8');
+            const repo = gh[pkg].repo;
+            const repoPatterns = [
+              `${pkg}@git+ssh://git@github.com/${repo}.git`, // git+ssh 形式
+              `${pkg}@https://codeload.github.com/${repo}/tar.gz`, // codeload tarball 形式（github: 简写会被 pnpm 解析到这个 URL）
+            ];
+            for (const key of repoPatterns) {
+              const re = new RegExp(`^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`, 'm');
+              if (!re.test(text)) {
+                const line = `  ${key}: true`;
+                if (/^allowBuilds:\s*$/m.test(text)) {
+                  text = text.replace(/^(allowBuilds:\s*)$/m, `$1\n${line}`);
+                } else if (/^allowBuilds:\s*\n[\s\S]+?(\n[a-zA-Z@_-]|\n$)/m.test(text)) {
+                  text = text.replace(/^(allowBuilds:\s*\n[\s\S]*?)(  [a-zA-Z@_-])/m, `$1${line}\n$2`);
+                } else {
+                  text = text.replace(/(\n[a-zA-Z])/m, `\nallowBuilds:\n${line}$1`);
+                }
+              }
+            }
+            fs.writeFileSync(wsPath, text, 'utf8');
+          }
+        } catch (e) {
+          ctx.log?.warn?.('patch pnpm-workspace.yaml failed', e.message);
         }
+        // 重试 update（pnpm-workspace.yaml 现在有通配 key 了）
+        const job2 = await runDsh(['plugin', '--profile', profile, 'update', pkg], { cwd: profDir });
+        const ok2 = job2.exitCode === 0;
+        appendLog(ctx.dataDir, {
+          action: 'update', profile, plugin: pkg, ok: ok2,
+          jobId: job2.id, exitCode: job2.exitCode, durationMs: job2.durationMs,
+          backupDir, autoApprovedBuilds: true,
+          stderrTail: job2.stderr?.slice(-2000), stdoutTail: job2.stdout?.slice(-2000),
+        });
+        return c.json({
+          ok: ok2, pkg, backupDir, job: job2, autoApprovedBuilds: true,
+          error: ok2 ? undefined : ((job2.error && '[spawn error] ' + job2.error) || job2.stderr?.trim().slice(-500) || `exit ${job2.exitCode}`),
+        });
       }
       const ok = firstJob.exitCode === 0;
       appendLog(ctx.dataDir, {
