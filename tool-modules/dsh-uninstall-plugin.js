@@ -6,12 +6,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { removeBundle, profileExists } from '../lib/dsh-profile.js';
 import { backupProfile } from '../lib/backup.js';
-import { removePackage } from '../lib/pnpm-runner.js';
+import { runDsh } from '../lib/cmd-runner.js';
 import { appendLog } from '../lib/operation-log.js';
 import { getDshHome, getDataDir, getLog } from '../lib/plugin-context.js';
 
 export const name = 'dsh_uninstall_plugin';
-export const description = '从指定 DSH profile 卸载一个 bundle 插件。会从 package.json / dsh.bundles / cordis.patch.yml 三处移除，并跑 pnpm remove。可选同时删除本地 link 文件（removeFiles=true）。';
+export const description = '从指定 DSH profile 卸载一个 bundle 插件。调用 dsh plugin remove（pnpm remove + bundles 自动 reconcile），再补 cordis.patch.yml 清理。可选同时删除本地 link 文件（removeFiles=true）。';
 
 export const parameters = {
   type: 'object',
@@ -38,8 +38,10 @@ export async function execute(input) {
   try {
     const backupDir = backupProfile(dataDir, dshHome, profile);
     const profDir = path.join(dshHome, 'profiles', profile);
-    const onLog = (line) => log.info?.(`[pnpm] ${line.trim()}`);
-    const removeResult = await removePackage(id, profDir, { onStdout: onLog, onStderr: onLog });
+    // 直连 dsh plugin remove：内部跑 pnpm remove + reconcilePlugins（bundles 自动出栈）。
+    // 不用裸 pnpm remove——裸跑会绕过 bundles reconcile，留下 dsh.profile.bundles 残留。
+    const job = await runDsh(['plugin', '--profile', profile, 'remove', id], { cwd: profDir });
+    // dsh reconcile 只动 bundles；profile 层 cordis.patch.yml 的 insert 残留仍需兜底清
     removeBundle(dshHome, profile, id);
 
     let removedDir = null;
@@ -55,16 +57,16 @@ export async function execute(input) {
       profile,
       plugin: id,
       removeFiles,
-      ok: removeResult.exitCode === 0,
+      ok: job.exitCode === 0,
       backupDir,
       removedDir,
     });
     return {
-      ok: removeResult.exitCode === 0,
+      ok: job.exitCode === 0,
       pluginName: id,
       backupDir,
       removedDir,
-      output: removeResult,
+      output: job,
     };
   } catch (e) {
     log.error?.('dsh_uninstall_plugin failed', e);

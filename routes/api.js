@@ -1217,24 +1217,33 @@ export default function (app, ctx) {
       return c.json({ ok: false, error: 'profile 不存在: ' + profile }, 400);
     }
     if (!pkg) return c.json({ ok: false, error: 'pkg 必填' }, 400);
-    // 安全：只允许 github 源插件（用 lockfile 校验），避免误更新 npm/link 插件
+    // 安全：只允许 github / npm registry 源插件（用 lockfile 校验），拒绝 link/file 源（本地源码不该被 dsh 更新）
     try {
       const lockPath = path.join(profileDirOf(dshHome, profile), 'pnpm-lock.yaml');
       const lockText = fs.readFileSync(lockPath, 'utf8');
-      const { parseGithubDeps } = await import('../lib/updater.js');
+      const { parseGithubDeps, parseNpmDeps } = await import('../lib/updater.js');
       const gh = parseGithubDeps(lockText);
-      if (!gh[pkg]) return c.json({ ok: false, error: '不是 GitHub 源插件，拒绝更新' }, 400);
+      const npm = parseNpmDeps(lockText);
+      const isGithub = !!gh[pkg];
+      const isNpm = !!npm[pkg];
+      if (!isGithub && !isNpm) {
+        return c.json({ ok: false, error: '不是 GitHub/npm registry 源插件，拒绝更新（link/file 源请走备份还原）' }, 400);
+      }
 
       const backupDir = autoBackup(ctx.dataDir, dshHome, profile);
       const profDir = profileDirOf(dshHome, profile);
-      // 检测并自动批准 pnpm 10+ 的 GitHub 源包 build script（统一逻辑见 lib/pnpm-build-allow.js）
-      const [owner, repo] = gh[pkg].repo.split('/');
+      // 检测并自动批准 pnpm 10+ 拒绝的 build script（统一逻辑见 lib/pnpm-build-allow.js）
+      // github 源传 repo 写仓库通配 key；npm 源不传 repo → 写纯包名 key
+      const repo = isGithub ? (() => {
+        const [owner, repo] = gh[pkg].repo.split('/');
+        return { owner, repo };
+      })() : null;
       const { secondJob, autoApproved } = await autoApprovePnpmBuilds({
         profDir,
         profile,
         dshArgs: ['update', pkg],
         pkg,
-        repo: { owner, repo },
+        repo,
         log: ctx.log,
       });
       const ok = secondJob.exitCode === 0;

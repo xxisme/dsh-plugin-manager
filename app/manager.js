@@ -1568,15 +1568,22 @@
     const upToDate = r.plugins.filter(p => p.status === 'up-to-date');
     const failed = r.plugins.filter(p => p.status === 'check-failed');
 
-    // 给所有 github 插件都渲染一行，包含 FORK 切换按钮
-    const renderRow = (p, opts = {}) => `
+    // 给所有插件都渲染一行，包含 FORK 切换按钮；GitHub 源显示 commit，npm 源显示版本
+    const renderRow = (p, opts = {}) => {
+      const isNpm = p.source === 'npm' || p.installKind === 'npm';
+      // GitHub 源: localCommit → upstream.commitShort；npm 源: localVersion → upstreamVersion
+      const verLine = isNpm
+        ? `${esc(p.localVersion || '?')} → ${esc(p.upstreamVersion || '?')}`
+        : `${p.localCommitShort || '?'} → ${p.upstream?.commitShort || '?'}`;
+      return `
       <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
         <div style="flex:1;min-width:0">
           <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
+            ${isNpm ? '<span class="tag" style="font-size:10px">npm</span>' : ''}
             ${opts.statusTag || ''}
             ${p.isModified ? '<span class="tag fork" style="font-size:10px">🏷 FORK</span>' : ''}
           </div>
-          <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">${p.localCommitShort || '?'} → ${p.upstream?.commitShort || '?'}</div>
+          <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">${verLine}</div>
           ${opts.subline || ''}
         </div>
         <div style="display:flex;gap:4px;align-items:center">
@@ -1588,6 +1595,7 @@
         </div>
       </div>
     `;
+    };
 
     // GitHub token 状态：直接读 localStorage（后端转发可能没生效）
     const hasLocalToken = (typeof localStorage !== 'undefined') && !!localStorage.getItem('github_token');
@@ -1598,14 +1606,14 @@
     panel.innerHTML = `
       <div class="glass" style="padding:10px 14px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:6px">
-          <b style="font-size:13px">📡 GitHub 源更新检查</b>
+          <b style="font-size:13px">📡 更新检查（GitHub commit + npm registry）</b>
           <span style="font-size:11px">🔑 Token: ${tokenHint}</span>
         </div>
         <div style="margin-bottom:8px">
           <span style="font-size:11px;color:var(--text-dim)">可更新 ${updatable.length}${forked.length ? ' · 本地不在 history ' + forked.length : ''}${behind.length ? ' · 落后 ' + behind.length : ''} · 已最新 ${upToDate.length}${failed.length ? ' · 失败 ' + failed.length : ''}</span>
         </div>
         ${updatable.length === 0 && forked.length === 0 && behind.length === 0 && failed.length === 0
-          ? '<div class="empty" style="padding:8px">所有 GitHub 插件都已是最新 🎉</div>'
+          ? '<div class="empty" style="padding:8px">所有插件都已是最新 🎉</div>'
           : ''}
         ${updatable.map(p => renderRow(p, {
           statusTag: '<span class="tag" style="font-size:10px;background:rgba(46,204,113,.15);color:#27ae60">可更新</span>' + (typeof p.commitsBehind === 'number' ? `<span class="tag behind" style="font-size:10px">落后 ${p.commitsBehind}</span>` : ''),
