@@ -40,6 +40,8 @@ import { detectHomes, getCurrentDshHome, setCurrentDshHome, addCustomDshHome } f
 import { scanProfile } from '../lib/plugin-scanner.js';
 import { backupPlugins } from '../lib/plugin-backup.js';
 import { restorePlugins, restorePluginsExec, githubCommitOf } from '../lib/plugin-restore.js';
+import { checkZipReady } from '../lib/plugin-zip-check.js';
+import { analyzeGithubRepo } from '../lib/github-installer.js';
 import { scanWorkspace, backupWorkspace } from '../lib/workspace.js';
 import { checkUpdates } from '../lib/updater.js';
 import { readMarks, isMarkedModified, setMark } from '../lib/plugin-marks.js';
@@ -420,7 +422,36 @@ export default function (app, ctx) {
       // 1) 备份当前 profile（backupDir 声明在 try 外，避免 backupProfile 抛错时外层 catch 引用 TDZ）
       backupDir = autoBackup(ctx.dataDir, dshHome, profile);
 
-      // 2) 解压到 profiles/<name>/external/<plugin>/
+      // 2) 装前体检——避免装上后 dsh web 启动失败
+      const check = checkZipReady(zipPath);
+      try {
+        // 写入操作日志
+        appendLog(ctx.dataDir, {
+          action: 'install.zip.precheck', profile, zipPath,
+          ok: check.ok, errors: check.errors, warnings: check.warnings,
+          pluginName: check.pluginName,
+        });
+      } catch { /* 日志失败不影响主流程 */ }
+      if (!check.ok) {
+        // 体检不通过：清理临时目录 + 给出详细报告
+        try { check.cleanup(); } catch {}
+        return c.json({
+          ok: false,
+          error: 'zip 体检不通过：' + check.errors.join('；'),
+          precheck: {
+            ok: false,
+            errors: check.errors,
+            warnings: check.warnings,
+            info: check.info,
+            pluginName: check.pluginName,
+            backupDir,
+          },
+        }, 400);
+      }
+      // 体检通过：warnings 收集起来给前端展示
+      const precheckWarnings = check.warnings;
+
+      // 3) 解压到 profiles/<name>/external/<plugin>/
       const profDir = profileDirOf(dshHome, profile);
       const externalDir = path.join(profDir, 'external');
       if (!fs.existsSync(externalDir)) fs.mkdirSync(externalDir, { recursive: true });
@@ -482,6 +513,8 @@ export default function (app, ctx) {
       if (destDir !== finalDir && fs.existsSync(destDir)) {
         try { fs.rmSync(destDir, { recursive: true, force: true }); } catch { /* ignore */ }
       }
+      // 体检清理（检验报告后中间文件不需要了）
+      try { check.cleanup(); } catch { /* ignore */ }
 
       // 3) 调 dsh plugin add link:<path>（让 dsh 自己处理 package.json + cordis + pnpm install）
       const linkPath = finalDir.replace(/\\/g, '/');
@@ -513,6 +546,7 @@ export default function (app, ctx) {
         backupDir,
         job,
         metadata,
+        precheckWarnings, //  体检通过但有 warnings（给前端提示用）
         restoreHint: ok ? null : (backupDir ? `已自动备份到 ${backupDir}，可在「备份」里恢复` : null),
         // 失败时把真实错误信息带回去：spawn 错误（job.error）> stderr > stdout > exitCode
         error: ok ? undefined : (
@@ -534,6 +568,71 @@ export default function (app, ctx) {
         ok: false, error: e.message, backupDir,
         restoreHint: backupDir ? `已自动备份到 ${backupDir}，可在「备份」里恢复` : null,
       }, 500);
+    }
+  });
+
+  // ─── GitHub URL 一键装：AI 分析页面 + 提取 install 命令 ───
+  // Step 1：只分析（不装）—— 抓 README + 解析推荐命令
+  app.post('/api/install/github', async (c) => {
+    const { url } = await c.req.json();
+    if (!url || typeof url !== 'string') {
+      return c.json({ ok: false, error: 'url 必填' }, 400);
+    }
+    try {
+      const r = await analyzeGithubRepo(url);
+      if (!r.ok) {
+        appendLog(ctx.dataDir, { action: 'install.github.analyze', url, ok: false, error: r.error });
+        return c.json({ ok: false, error: r.error, owner: r.owner, repo: r.repo }, 400);
+      }
+      appendLog(ctx.dataDir, {
+        action: 'install.github.analyze', url, ok: true,
+        owner: r.owner, repo: r.repo,
+        recommended: r.recommended?.command,
+        altCount: r.alternatives?.length || 0,
+      });
+      return c.json({ ok: true, ...r });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // Step 2：执行推荐命令—— spawn dsh plugin add <spec> 走 runDsh job
+  app.post('/api/install/github/exec', async (c) => {
+    const { profile, spec } = await c.req.json();
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
+    }
+    if (!spec || typeof spec !== 'string') return c.json({ ok: false, error: 'spec 必填' }, 400);
+    // 安全：spec 必须是合法包名格式（npm 包名 / github:owner/repo[#commit]），不允许任意 dsh 命令
+    // 允许: @scope/name、name、github:owner/repo[#commit]、git+https://...#commit、link:...
+    if (!/^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*(@[\w./-]+)?$|^github:[a-z0-9-]+\/[a-z0-9._-]+(#[\w./-]+)?$|^git\+https:\/\/.+#[\w./-]+$|^link:.+$/i.test(spec)) {
+      return c.json({ ok: false, error: `非法的 spec 格式（仅支持 npm 包名 / github:owner/repo / link:...）: ${spec}` }, 400);
+    }
+    try {
+      // 备份 + dsh plugin add spec（用 runDsh 创建 job 供前端轮询）
+      const backupDir = autoBackup(ctx.dataDir, dshHome, profile);
+      const profDir = profileDirOf(dshHome, profile);
+      const job = await runDsh(['plugin', '--profile', profile, 'add', spec], { cwd: profDir });
+      const ok = job.exitCode === 0;
+      appendLog(ctx.dataDir, {
+        action: 'install.github.exec', profile, spec, ok,
+        jobId: job.id, exitCode: job.exitCode, durationMs: job.durationMs,
+        backupDir,
+        stdoutTail: job.stdout?.slice(-800), stderrTail: job.stderr?.slice(-800),
+      });
+      return c.json({
+        ok,
+        spec,
+        profile,
+        jobId: job.id,
+        job,
+        backupDir,
+        error: ok ? undefined : ((job.error && `[spawn error] ${job.error}`) || job.stderr?.trim().slice(-500) || `exit ${job.exitCode}`),
+      });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
     }
   });
 

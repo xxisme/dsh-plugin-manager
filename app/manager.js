@@ -157,6 +157,9 @@
               <button class="install-tab ${STATE.activeTab === 'cmd' ? 'active' : ''}" data-install-tab="cmd">
                 ⌨️ dsh 命令
               </button>
+              <button class="install-tab ${STATE.activeTab === 'github' ? 'active' : ''}" data-install-tab="github">
+                ✨ GitHub URL
+              </button>
             </div>
 
             <div class="install-body" id="install-body"></div>
@@ -225,6 +228,9 @@
     if (STATE.activeTab === 'zip') {
       body.innerHTML = renderZipPanel();
       bindZipPanel();
+    } else if (STATE.activeTab === 'github') {
+      body.innerHTML = renderGithubPanel();
+      bindGithubPanel();
     } else {
       body.innerHTML = renderCmdPanel();
       bindCmdPanel();
@@ -277,6 +283,112 @@
       zipIn.oninput = updateZipInfo;
       zipIn.onchange = updateZipInfo;
     }
+  }
+
+  // ✨ GitHub URL 一键装：输入 GitHub 仓库 URL， AI 抓取 README 提取 install 命令
+  function renderGithubPanel() {
+    return `
+      <div class="hint-row">贴一个 DSH 插件的 GitHub 仓库页面链接（比如 <code>https://github.com/omdsh-dev/DSH-better-sidebar</code>），AI 会抓 README 提取官方安装命令，确认后自动跑。</div>
+      <div class="install-row">
+        <input id="gh-url" placeholder="https://github.com/owner/repo" />
+        <button class="btn" id="gh-analyze-btn">✨ 分析页面</button>
+      </div>
+      <div id="gh-result" style="margin-top:10px"></div>
+    `;
+  }
+
+  function renderPrecheckReport(pc) {
+    // 装前体检报告渲染：errors/warnings/info 各自一段
+    const icon = pc.ok ? '✅' : '❌';
+    const status = pc.ok ? '体检通过' : '体检不通过（已拒绝安装）';
+    const errs = (pc.errors || []).map((e) => `<li style="color:#c0392b">❌ ${esc(e)}</li>`).join('') || '<li style="color:#27ae60">无错误</li>';
+    const warns = (pc.warnings || []).map((w) => `<li style="color:#b8860b">⚠️ ${esc(w)}</li>`).join('') || '<li style="color:#666">无警告</li>';
+    const infos = (pc.info || []).map((i) => `<li style="color:var(--text-dim);font-size:11px">${esc(i)}</li>`).join('') || '<li style="color:#666">无</li>';
+    return `<div style="background:var(--bg-info,rgba(0,0,0,.04));padding:14px;border-radius:6px">
+      <div style="font-weight:600;font-size:14px;margin-bottom:8px">${icon} ${status}${pc.pluginName ? `（${esc(pc.pluginName)}）` : ''}</div>
+      <div style="margin-bottom:8px"><b style="color:#c0392b">错误：</b><ul style="margin:4px 0 0 18px;padding:0">${errs}</ul></div>
+      <div style="margin-bottom:8px"><b style="color:#b8860b">警告：</b><ul style="margin:4px 0 0 18px;padding:0">${warns}</ul></div>
+      <div><b style="color:var(--text-dim)">信息：</b><ul style="margin:4px 0 0 18px;padding:0">${infos}</ul></div>
+    </div>`;
+  }
+
+  function bindGithubPanel() {
+    if (!STATE.currentProfile) return;
+    const btn = $('gh-analyze-btn');
+    if (btn) btn.onclick = analyzeGithub;
+  }
+
+  async function analyzeGithub() {
+    const url = $('gh-url').value.trim();
+    if (!url) { toast('贴一个 GitHub URL', 'warn'); return; }
+    if (!url.includes('github.com')) { toast('只支持 github.com 链接', 'warn'); return; }
+    const out = $('gh-result');
+    out.innerHTML = '<div class="empty">🤔 抓取 README 并分析…（最多 10 秒）</div>';
+    const r = await api('POST', '/api/install/github', { url });
+    if (!r.ok) {
+      out.innerHTML = `<div class="result-msg err">❌ ${esc(r.error)}${r.owner ? `（repo: ${esc(r.owner)}/${esc(r.repo)}）` : ''}</div>`;
+      return;
+    }
+    out.innerHTML = renderGithubResult(r);
+    bindGithubResultHandlers(r);
+  }
+
+  function renderGithubResult(r) {
+    const rec = r.recommended || {};
+    const alts = r.alternatives || [];
+    return `
+      <div class="glass" style="padding:12px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px">📊 分析结果：<code>${esc(r.owner)}/${esc(r.repo)}</code></div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">从 README 找到 ${r.allCommands?.length || 0} 条 install 命令</div>
+        <div style="background:rgba(46,204,113,.1);border-left:3px solid #27ae60;padding:10px;border-radius:4px;margin-bottom:8px">
+          <div style="font-size:11px;color:var(--text-dim)">⭐ 推荐</div>
+          <div style="margin:4px 0"><code style="font-size:12px;word-break:break-all">${esc(rec.command)}</code></div>
+          <div style="font-size:11px;color:var(--text-dim)">${esc(rec.detail || '')}</div>
+          <button class="btn accent" id="gh-confirm-btn" style="margin-top:8px">▶ 确认安装</button>
+        </div>
+        ${alts.length ? `
+        <details style="font-size:11px">
+          <summary style="cursor:pointer;color:var(--text-dim)">其他 ${alts.length} 条候选</summary>
+          <div style="margin-top:6px">
+            ${alts.map((a, i) => `<div style="padding:4px 0;border-top:1px solid var(--border)"><code style="font-size:11px">${esc(a.command)}</code><div style="color:var(--text-dim);font-size:10px">${esc(a.detail || '')}</div></div>`).join('')}
+          </div>
+        </details>` : ''}
+      </div>
+    `;
+  }
+
+  function bindGithubResultHandlers(r) {
+    const rec = r.recommended;
+    if (!rec) return;
+    const btn = $('gh-confirm-btn');
+    if (btn) btn.onclick = async () => {
+      if (!(await uiConfirm(`执行以下命令？\n\n${rec.command}\n\n会先备份当前 profile（可反悔）。`))) return;
+      btn.disabled = true;
+      btn.innerHTML = '⏳ 装包中…';
+      // 从 command 里提取 spec（dsh plugin ... add <spec> 的最后参数）
+      const m = rec.command.match(/add\s+([^\s]+(?:\s+[^\s]+)?)$/);
+      const spec = m ? m[1].trim() : rec.command;
+      // 显示 output-section（复用现有的轮询 + 流式展示）
+      const out = $('gh-result');
+      showOutput({ id: 'pending', status: 'running', stdout: `⏳ ${rec.command}\n   profile: ${STATE.currentProfile}\n\n`, stderr: '' });
+      const res = await api('POST', '/api/install/github/exec', { profile: STATE.currentProfile, spec }, { timeoutMs: 30 * 60 * 1000 });
+      if (res.ok && res.job) {
+        showOutput(res.job);
+        if (res.job.status === 'running') STATE.pollTimer = setTimeout(() => pollJob(res.job.id), 300);
+        if (res.job.exitCode === 0) {
+          toast(`✅ ${spec} 已安装`);
+          await loadPlugins(STATE.currentProfile);
+          await loadLogs();
+        } else {
+          toast(`安装失败：${res.error || 'exit ' + res.job.exitCode}`, 'error');
+        }
+      } else {
+        showOutput({ id: 'err', status: 'error', stdout: '', stderr: res.error || '未知错误' });
+        toast(`安装失败：${res.error || '未知错误'}`, 'error');
+      }
+      btn.disabled = false;
+      btn.innerHTML = '▶ 确认安装';
+    };
   }
 
   function bindCmdPanel() {
@@ -547,6 +659,16 @@
         force,
       });
 
+      // 体检不通过（4xx + precheck）→ 直接显示报告，不进入安装流程
+      if (!r.ok && r.precheck) {
+        $('output-section').style.display = 'block';
+        $('output-log').innerHTML = renderPrecheckReport(r.precheck);
+        toast('体检不通过：' + r.error, 'error');
+        btn.disabled = false;
+        btn.innerHTML = '📦 安装';
+        return;
+      }
+
       if (r.job && r.job.id) {
         // 切到真实 job
         showOutput(r.job);
@@ -559,6 +681,10 @@
       }
 
       if (r.ok) {
+        // 如果体检有 warnings（非阻塞）， toast 提示
+        if (r.precheckWarnings && r.precheckWarnings.length) {
+          toast(`⚠️ 安装成功但有 ${r.precheckWarnings.length} 个警告，请查看输出`, 'warn');
+        }
         toast(`✅ 安装成功: ${r.pluginName}`);
         await loadPlugins(STATE.currentProfile);
         await loadLogs();
