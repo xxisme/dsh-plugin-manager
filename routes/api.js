@@ -71,6 +71,13 @@ function resolveDshHome() {
   return null;
 }
 
+// 工具：备份 + 顺手清理旧备份（保持 profile 保留最近 10 条自动备份，避免 disk 暴涨）
+function autoBackup(dataDir, dshHome, profile) {
+  const dir = backupProfile(dataDir, dshHome, profile);
+  try { cleanupOldBackups(dataDir, 10); } catch { /* 清理失败不影响本次备份 */ }
+  return dir;
+}
+
 function profileDirOf(dshHome, profileName) {
   return path.join(dshHome, 'profiles', profileName);
 }
@@ -411,7 +418,7 @@ export default function (app, ctx) {
     let backupDir = null;
     try {
       // 1) 备份当前 profile（backupDir 声明在 try 外，避免 backupProfile 抛错时外层 catch 引用 TDZ）
-      backupDir = backupProfile(ctx.dataDir, dshHome, profile);
+      backupDir = autoBackup(ctx.dataDir, dshHome, profile);
 
       // 2) 解压到 profiles/<name>/external/<plugin>/
       const profDir = profileDirOf(dshHome, profile);
@@ -562,7 +569,7 @@ export default function (app, ctx) {
 
     try {
       // 备份当前 profile
-      const backupDir = backupProfile(ctx.dataDir, dshHome, parsed.profile);
+      const backupDir = autoBackup(ctx.dataDir, dshHome, parsed.profile);
 
       const profDir = profileDirOf(dshHome, parsed.profile);
       const job = await runDsh(parsed.fullArgs, { cwd: profDir });
@@ -622,7 +629,7 @@ export default function (app, ctx) {
     if (!id) return c.json({ ok: false, error: 'id 必填' }, 400);
 
     try {
-      const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
+      const backupDir = autoBackup(ctx.dataDir, dshHome, profile);
       const profDir = profileDirOf(dshHome, profile);
       const job = await runDsh(
         ['plugin', '--profile', profile, 'remove', id],
@@ -673,7 +680,7 @@ export default function (app, ctx) {
     }
 
     try {
-      const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
+      const backupDir = autoBackup(ctx.dataDir, dshHome, profile);
       setBundleEnabled(dshHome, profile, id, enabled);
       appendLog(ctx.dataDir, { action: enabled ? 'enable' : 'disable', profile, plugin: id, ok: true, backupDir });
       return c.json({ ok: true, id, enabled, backupDir });
@@ -982,7 +989,7 @@ export default function (app, ctx) {
       const gh = parseGithubDeps(lockText);
       if (!gh[pkg]) return c.json({ ok: false, error: '不是 GitHub 源插件，拒绝更新' }, 400);
 
-      const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
+      const backupDir = autoBackup(ctx.dataDir, dshHome, profile);
       const profDir = profileDirOf(dshHome, profile);
       // 先跑一次 update，看输出是否提到 allowBuilds（pnpm 10+ 默认拒绝 GitHub 源包跑 build）
       // 如果是，就自动批准 + 重试。避免 pnpm-workspace.yaml 手动维护。
@@ -1106,7 +1113,7 @@ export default function (app, ctx) {
       const spec = (index.plugins || []).find((s) => s.pkg === pkg);
       if (!spec) return c.json({ ok: false, error: `备份 ${timestamp} 里没有插件 ${pkg}` }, 400);
       // 回滚前先备份当前 profile（安全网，可反悔）
-      const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
+      const backupDir = autoBackup(ctx.dataDir, dshHome, profile);
       const pluginsRoot = path.join(backupRoot, 'plugins');
       const exec = await makeRestoreExec(dshHome, profile, pluginsRoot);
       const r = await restorePluginsExec([spec], pluginsRoot, exec);
