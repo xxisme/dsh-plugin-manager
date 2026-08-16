@@ -1361,22 +1361,57 @@
     try {
       // update 是后台 job（pnpm install + pnpm reload），耗时长。用 30min 超时避免 10s 默认超时误报"更新异常"。
       const r = await api('POST', '/api/updates/apply', { profile: profName, pkg }, { timeoutMs: 30 * 60 * 1000 });
-      if (!r.ok) { toast('更新失败：' + (r.error || '未知错误'), 'error'); return; }
+      if (!r.ok) { toast('更新失败：' + (r.error || '未知错误'), 'error'); showUpdateErrorDetail(pkg, r.error || '未知错误', null, null); return; }
       if (r.ok && r.job && r.job.exitCode === 0) {
         toast(`✅ ${pkg} 已更新`);
         await loadPlugins(profName);
         await loadLogs();
         checkUpdatesUI();
       } else {
-        toast(`更新失败：${r.error || ('exit ' + (r.job && r.job.exitCode))}`, 'error');
+        const errMsg = r.error || ('exit ' + (r.job && r.job.exitCode));
+        toast(`更新失败：${errMsg}`, 'error');
+        showUpdateErrorDetail(pkg, errMsg, r.stderrTail, r.stdoutTail);
         btn.innerHTML = original;
         btn.disabled = false;
       }
     } catch (e) {
       toast('更新异常：' + e.message, 'error');
+      showUpdateErrorDetail(pkg, e.message, null, null);
       btn.innerHTML = original;
       btn.disabled = false;
     }
+  }
+
+  // 在检查更新面板里追加一个错误详情块（scrollable，可折叠，可复制）
+  // stderr/stdout 来自 /api/updates/apply 返回的 stderrTail/stdoutTail
+  function showUpdateErrorDetail(pkg, errMsg, stderrTail, stdoutTail) {
+    const panel = $('update-panel');
+    if (!panel) return;
+    panel.style.display = 'block';
+    // 移除该 pkg 之前的错误块（避免多次重复）
+    panel.querySelectorAll(`[data-update-err-pkg="${cssEscape(pkg)}"]`).forEach(el => el.remove());
+    const block = document.createElement('div');
+    block.dataset.updateErrPkg = pkg;
+    block.style.cssText = 'margin-top:10px;padding:10px 12px;background:rgba(231,76,60,.08);border:1px solid rgba(231,76,60,.4);border-radius:6px;font-size:11px';
+    const preStyle = 'background:#1e1e1e;color:#d4d4d4;padding:8px 10px;border-radius:4px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-family:Consolas,monospace;font-size:11px;margin:6px 0 0';
+    block.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b style="color:#c0392b">❌ ${esc(pkg)} 更新失败</b>
+        <button class="btn sm" data-close-err>✕ 关闭</button>
+      </div>
+      <div style="margin-top:4px;color:#7b241c"><b>摘要：</b>${esc(errMsg)}</div>
+      ${stderrTail ? `<details open><summary style="cursor:pointer;color:#c0392b;margin-top:6px">📋 stderr（点我折叠）</summary><pre style="${preStyle}">${esc(stderrTail)}</pre></details>` : ''}
+      ${stdoutTail ? `<details><summary style="cursor:pointer;color:#2c3e50;margin-top:6px">📤 stdout</summary><pre style="${preStyle}">${esc(stdoutTail)}</pre></details>` : ''}
+    `;
+    panel.appendChild(block);
+    block.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    block.querySelector('[data-close-err]').addEventListener('click', () => block.remove());
+  }
+
+  // CSS.escape 兼容（部分老浏览器没有 CSS.escape）
+  function cssEscape(s) {
+    if (window.CSS && CSS.escape) return CSS.escape(s);
+    return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   }
 
   // ── 启动 ──────────────────────────────────────────

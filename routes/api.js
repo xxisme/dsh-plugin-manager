@@ -870,7 +870,8 @@ export default function (app, ctx) {
       appendLog(ctx.dataDir, {
         action: 'update', profile, plugin: pkg, ok,
         jobId: job.id, exitCode: job.exitCode, durationMs: job.durationMs,
-        backupDir, stderrTail: job.stderr?.slice(-500), stdoutTail: job.stdout?.slice(-500),
+        backupDir, // stderr/stdout 各保留最后 2000 字符（pnpm 错误提示比较长，500 不够）
+        stderrTail: job.stderr?.slice(-2000), stdoutTail: job.stdout?.slice(-2000),
       });
       return c.json({
         ok, pkg, backupDir, job,
