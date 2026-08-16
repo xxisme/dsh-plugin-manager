@@ -132,6 +132,7 @@
           ${homeSwitcher}
           <button class="btn sm" id="btn-refresh">🔄 刷新</button>
           <button class="btn sm" id="btn-backups">🗄️ 备份</button>
+<button class="btn sm" id="btn-v2">📦 插件源</button>
         </div>
       </div>
 
@@ -195,6 +196,7 @@
 
     $('btn-refresh').addEventListener('click', loadAll);
     $('btn-backups').addEventListener('click', openBackupsModal);
+    $('btn-v2').addEventListener('click', openV2Modal);
     if ($('btn-home-switch')) $('btn-home-switch').addEventListener('click', openHomeSwitcher);
 
     // profile list clicks
@@ -1020,6 +1022,129 @@
   }
 
   function closeModal() { $('modal').classList.remove('show'); $('modal').innerHTML = ''; }
+
+  // ── 备份 v2：插件源备份 modal ─────────────────────
+  // 三策略：pointer（只存指针）/ blob-raw（原物）/ blob-modified（魔改源码）
+  // 流程：扫描预览 → 确认备份 → 列历史 → dry-run 恢复预览 → apply
+  async function openV2Modal() {
+    const m = $('modal');
+    const profName = STATE.currentProfile;
+    m.innerHTML = `
+      <div class="modal" onclick="event.stopPropagation()">
+        <h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span>📦 插件源备份 v2</span>
+          <button class="btn sm ghost" onclick="document.getElementById('modal').classList.remove('show')">✕</button>
+        </h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;line-height:1.6">
+          插件本体代码备份：能重拉的（npm / GitHub 源）只存指针；本地 zip / link 目录 / 魔改源码存完整内容。<br>
+          <span style="color:var(--text-faint,#888)">${profName ? '当前 profile：' + esc(profName) : '未选择 profile——先选一个再备份'}</span>
+        </div>
+        ${profName ? `
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <button class="btn sm" id="btn-v2-scan">🔍 扫描预览</button>
+          <button class="btn sm primary" id="btn-v2-backup">💾 立即备份</button>
+        </div>
+        <div id="v2-scan-result" style="font-size:12px;max-height:220px;overflow-y:auto;margin-bottom:10px"></div>
+        <div style="border-top:1px solid var(--border);padding-top:10px">
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">历史 v2 备份：</div>
+          <div id="v2-history" style="font-size:12px;max-height:180px;overflow-y:auto">加载中…</div>
+        </div>` : '<div class="empty">请先在左侧选择 profile</div>'}
+      </div>
+    `;
+    m.classList.add('show');
+    m.addEventListener('click', closeModal);
+
+    if (profName) {
+      $('btn-v2-scan').addEventListener('click', () => v2Scan());
+      $('btn-v2-backup').addEventListener('click', () => v2Backup());
+      loadV2History();
+    }
+  }
+
+  // 扫描预览：列出每个插件的策略 + 指纹 + 大小
+  async function v2Scan() {
+    const el = $('v2-scan-result');
+    el.innerHTML = '<div class="empty">扫描中…</div>';
+    const r = await api('GET', '/api/v2/scan?profile=' + encodeURIComponent(STATE.currentProfile));
+    if (!r.ok) { el.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">' + esc(r.error) + '</div>'; return; }
+    el.innerHTML = `
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">共 ${r.plugins.length} 个插件（lock 直接依赖）</div>
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <tr style="color:var(--text-faint,#888)">
+          <td style="padding:3px 6px">插件</td><td>策略</td><td>来源</td><td>版本</td><td>文件</td><td>指纹</td>
+        </tr>
+        ${r.plugins.map(p => `
+          <tr style="border-top:1px solid var(--border,#ddd)">
+            <td style="padding:4px 6px">${esc(p.pkg)}${p.isSymlink ? ' 🔗' : ''}</td>
+            <td><span style="padding:1px 6px;border-radius:4px;font-size:10px;background:${p.strategy === 'pointer' ? 'rgba(46,204,113,.15)' : 'rgba(241,196,15,.2)'};color:${p.strategy === 'pointer' ? '#27ae60' : '#b9770e'}">${p.strategy}</span></td>
+            <td style="color:var(--text-dim)">${p.installKind}</td>
+            <td>${esc(p.localVersion || '?')}</td>
+            <td>${p.fileCount}</td>
+            <td style="font-family:monospace;font-size:10px;color:var(--text-faint)">${p.fingerprintShort}</td>
+          </tr>
+        `).join('')}
+      </table>
+    `;
+  }
+
+  // 执行备份
+  async function v2Backup() {
+    const el = $('v2-scan-result');
+    el.innerHTML = '<div class="empty">备份中…（大目录可能需要一点时间）</div>';
+    const r = await api('POST', '/api/v2/backup', { profile: STATE.currentProfile });
+    if (!r.ok) { el.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">备份失败：' + esc(r.error) + '</div>'; return; }
+    const okCount = r.results.filter(x => x.ok).length;
+    const failCount = r.results.filter(x => !x.ok).length;
+    el.innerHTML = `
+      <div style="font-size:12px;margin-bottom:6px">✅ 备份完成：${okCount} 成功${failCount ? '，' + failCount + ' 失败' : ''}</div>
+      <div style="font-size:11px;color:var(--text-dim);word-break:break-all">${esc(r.backupRoot)}</div>
+      <div style="font-size:11px;margin-top:6px">
+        ${r.results.map(x => `<div>${x.ok ? '✓' : '✗'} ${esc(x.pkg)}：${x.mode === 'pointer' ? '只存指针' : (x.bytes / 1024 / 1024).toFixed(2) + 'MB / ' + x.files + ' 文件'}</div>`).join('')}
+      </div>
+    `;
+    loadV2History();
+  }
+
+  // 历史 v2 备份 + 恢复入口
+  async function loadV2History() {
+    const el = $('v2-history');
+    if (!el) return;
+    const r = await api('GET', '/api/v2/backups');
+    if (!r.ok) { el.innerHTML = '<div class="empty">' + esc(r.error) + '</div>'; return; }
+    const list = (r.backups && r.backups[STATE.currentProfile]) || [];
+    if (list.length === 0) { el.innerHTML = '<div class="empty">暂无 v2 备份</div>'; return; }
+    el.innerHTML = list.map(ts => `
+      <div class="glass" style="padding:8px 12px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span style="font-family:monospace;font-size:11px">${esc(ts)}</span>
+        <span>
+          <button class="btn sm ghost" data-v2-preview="${esc(ts)}">预览恢复</button>
+          <button class="btn sm" data-v2-apply="${esc(ts)}">应用恢复</button>
+        </span>
+      </div>
+    `).join('');
+    el.querySelectorAll('[data-v2-preview]').forEach(b => b.addEventListener('click', () => v2Restore(b.dataset.v2Preview, false)));
+    el.querySelectorAll('[data-v2-apply]').forEach(b => b.addEventListener('click', () => v2Restore(b.dataset.v2Apply, true)));
+  }
+
+  // 恢复：dryRun=true 预览命令；dryRun=false 实际恢复
+  async function v2Restore(timestamp, apply) {
+    const el = $('v2-scan-result');
+    const r = await api('POST', '/api/v2/restore', { profile: STATE.currentProfile, timestamp, apply });
+    if (!r.ok) { el.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">' + esc(r.error) + '</div>'; return; }
+    if (r.dryRun) {
+      el.innerHTML = `
+        <div style="font-size:12px;font-weight:500;margin-bottom:6px">🔍 恢复预览（dry-run，未写入）</div>
+        <div style="font-size:11px;font-family:monospace;line-height:1.7">${r.results.map(x =>
+          `${x.pkg}：${x.commands.map(c => esc(c)).join('；')}`).join('<br>')}</div>
+        <div style="font-size:11px;color:var(--text-faint,#888);margin-top:6px">blob 插件会覆盖目标目录；pointer 插件需在 profile 里跑 pnpm add。</div>
+      `;
+    } else {
+      const ok = r.results.filter(x => x.ok !== false).length;
+      el.innerHTML = `<div style="font-size:12px">✅ 已恢复 ${ok}/${r.results.length} 个插件。pointer 插件的 pnpm 命令仍需手动执行或后续安装。</div>`;
+      loadV2History();
+      if (STATE.currentProfile) loadPlugins(STATE.currentProfile);
+    }
+  }
 
   // ── 启动 ──────────────────────────────────────────
   function ts(s) {

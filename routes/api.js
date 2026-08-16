@@ -36,6 +36,9 @@ import {
   cleanupOldBackups,
 } from '../lib/backup.js';
 import { detectHomes, getCurrentDshHome, setCurrentDshHome, addCustomDshHome } from '../lib/homes.js';
+import { scanProfile } from '../lib/plugin-scanner.js';
+import { backupPlugins } from '../lib/plugin-backup.js';
+import { restorePlugins } from '../lib/plugin-restore.js';
 import {
   pnpmAvailable,
   install,
@@ -679,6 +682,82 @@ export default function (app, ctx) {
       const restored = restoreProfile(ctx.dataDir, backupDir, dshHome, profile);
       appendLog(ctx.dataDir, { action: 'restore', profile, backupDir, ok: true, files: restored });
       return c.json({ ok: true, restored });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // ── 备份 v2：插件源备份（scan → backup → restore） ──────
+  // 扫描 profile 的插件集，输出 PluginSpec[]（含策略分类）
+  app.get('/api/v2/scan', (c) => {
+    const profile = c.req.query('profile');
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: 'profile 不存在: ' + profile }, 400);
+    }
+    try {
+      const r = scanProfile(profileDirOf(dshHome, profile));
+      if (!r.ok) return c.json({ ok: false, error: r.error }, 400);
+      return c.json({ ok: true, ...r });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // 备份 v2：扫描 + 落盘到 <dataDir>/backups-v2/<profile>/<timestamp>/
+  app.post('/api/v2/backup', async (c) => {
+    const { profile, marks } = await c.req.json();
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: 'profile 不存在: ' + profile }, 400);
+    }
+    try {
+      const scan = scanProfile(profileDirOf(dshHome, profile), { marks: marks || {} });
+      if (!scan.ok) return c.json({ ok: false, error: scan.error }, 400);
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const backupRoot = path.join(ctx.dataDir, 'backups-v2', profile, ts);
+      const results = backupPlugins(scan.plugins, path.join(backupRoot, 'plugins'));
+      appendLog(ctx.dataDir, { action: 'backup.v2', profile, backupRoot, ok: true, plugins: results.length });
+      return c.json({ ok: true, backupRoot, results });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // 列出 v2 备份（按 profile 分组）
+  app.get('/api/v2/backups', (c) => {
+    const root = path.join(ctx.dataDir, 'backups-v2');
+    const list = {};
+    if (fs.existsSync(root)) {
+      for (const profile of fs.readdirSync(root)) {
+        const pd = path.join(root, profile);
+        if (!fs.statSync(pd).isDirectory()) continue;
+        list[profile] = fs.readdirSync(pd).filter((d) => fs.statSync(path.join(pd, d)).isDirectory());
+      }
+    }
+    return c.json({ ok: true, backups: list });
+  });
+
+  // v2 恢复预览（dry-run）：从备份 index 读 spec，生成命令
+  app.post('/api/v2/restore', async (c) => {
+    const { profile, timestamp, apply } = await c.req.json();
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !timestamp) return c.json({ ok: false, error: 'profile/timestamp 缺失' }, 400);
+    const backupRoot = path.join(ctx.dataDir, 'backups-v2', profile, timestamp);
+    const indexPath = path.join(backupRoot, 'plugins', 'index.json');
+    if (!fs.existsSync(indexPath)) return c.json({ ok: false, error: '备份不存在: ' + backupRoot }, 404);
+    try {
+      const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+      const specs = index.plugins;
+      const dryRun = apply !== true;
+      const results = restorePlugins(specs, path.join(backupRoot, 'plugins'), { dryRun });
+      if (!dryRun) {
+        appendLog(ctx.dataDir, { action: 'restore.v2', profile, backupRoot, ok: true });
+      }
+      return c.json({ ok: true, dryRun, results });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
     }
