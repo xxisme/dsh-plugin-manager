@@ -133,8 +133,8 @@
         <div class="actions">
           ${homeSwitcher}
           <button class="btn sm" id="btn-refresh">🔄 刷新</button>
-          <button class="btn sm" id="btn-backups">🗄️ 备份</button>
-<button class="btn sm" id="btn-v2">📦 插件源</button>
+          <button class="btn sm" id="btn-backups">🗄️ 备份配置文件</button>
+          <button class="btn sm" id="btn-v2">📦 备份插件源</button>
         </div>
       </div>
 
