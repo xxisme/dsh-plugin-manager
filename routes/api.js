@@ -407,9 +407,10 @@ export default function (app, ctx) {
       return c.json({ ok: false, error: `zip 文件不存在: ${zipPath}` }, 400);
     }
 
+    let backupDir = null;
     try {
-      // 1) 备份当前 profile
-      const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
+      // 1) 备份当前 profile（backupDir 声明在 try 外，避免 backupProfile 抛错时外层 catch 引用 TDZ）
+      backupDir = backupProfile(ctx.dataDir, dshHome, profile);
 
       // 2) 解压到 profiles/<name>/external/<plugin>/
       const profDir = profileDirOf(dshHome, profile);
@@ -441,6 +442,16 @@ export default function (app, ctx) {
         try { fs.rmSync(destDir, { recursive: true, force: true }); } catch { /* ignore */ }
         return c.json({
           ok: false, error: 'plugin package.json 缺少 name 字段',
+          backupDir, restoreHint: backupDir ? `已自动备份到 ${backupDir}` : null,
+        }, 400);
+      }
+      // 防 shell 注入：pluginName 会拼进 link: 参数（Windows spawn shell:true 下 cmd 元字符有逃逸面）。
+      // npm 包名本身就是 URL 安全字符集（字母数字 @ . _ / -），超出即拒绝。
+      if (!/^[a-zA-Z0-9@._/-]+$/.test(pluginName) || pluginName.includes('..')) {
+        try { fs.rmSync(destDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        return c.json({
+          ok: false,
+          error: `插件名含不安全字符（可能被 shell 解释），拒绝安装: ${pluginName}`,
           backupDir, restoreHint: backupDir ? `已自动备份到 ${backupDir}` : null,
         }, 400);
       }
@@ -957,6 +968,8 @@ export default function (app, ctx) {
         // 重试 update（pnpm-workspace.yaml 现在有通配 key 了）
         const job2 = await runDsh(['plugin', '--profile', profile, 'update', pkg], { cwd: profDir });
         const ok2 = job2.exitCode === 0;
+        // 更新成功 → 清掉检查缓存，否则前端重新 check 命中旧缓存仍显示"落后 N"
+        if (ok2) updateCheckCache.delete(`${dshHome}|${profile}`);
         appendLog(ctx.dataDir, {
           action: 'update', profile, plugin: pkg, ok: ok2,
           jobId: job2.id, exitCode: job2.exitCode, durationMs: job2.durationMs,
@@ -969,6 +982,8 @@ export default function (app, ctx) {
         });
       }
       const ok = firstJob.exitCode === 0;
+      // 更新成功 → 清掉检查缓存，否则前端重新 check 命中旧缓存仍显示"落后 N"
+      if (ok) updateCheckCache.delete(`${dshHome}|${profile}`);
       appendLog(ctx.dataDir, {
         action: 'update', profile, plugin: pkg, ok,
         jobId: firstJob.id, exitCode: firstJob.exitCode, durationMs: firstJob.durationMs,

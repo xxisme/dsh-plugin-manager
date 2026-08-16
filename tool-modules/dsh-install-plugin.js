@@ -65,8 +65,16 @@ export async function execute(input) {
       if (addResult.exitCode !== 0) {
         return { ok: false, error: 'pnpm add 失败', output: addResult, backupDir };
       }
-      let depsKey = spec.split(/\s+/)[0].split('@')[0];
-      if (spec.startsWith('@')) depsKey = '@' + spec.split('@')[1].split(/\s|\//)[0];
+      // 从 spec 推断 dependencies key：@scope/pkg@ver → @scope/pkg；pkg@ver → pkg；github:user/repo → 取 repo 名
+      let depsKey = spec.split(/\s+/)[0];
+      if (depsKey.startsWith('github:')) depsKey = depsKey.slice('github:'.length).split('/').slice(-1)[0];
+      else if (depsKey.startsWith('@')) {
+        const parts = depsKey.slice(1).split('/');
+        depsKey = parts.length >= 2 ? '@' + parts[0] + '/' + parts[1].split('@')[0] : '@' + parts[0];
+      } else {
+        depsKey = depsKey.split('@')[0];
+      }
+      if (!depsKey) return { ok: false, error: `无法从 spec 解析包名: ${spec}` };
       addBundle(dshHome, profile, { id: depsKey, depsSpec: spec, depsKey });
       appendLog(dataDir, { action: 'install.registry', profile, plugin: depsKey, spec, ok: true, backupDir });
       return { ok: true, pluginName: depsKey, backupDir, output: addResult };

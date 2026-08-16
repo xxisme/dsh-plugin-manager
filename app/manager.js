@@ -897,7 +897,8 @@
     if (action === 'toggle') {
       const cur = STATE.plugins.find((p) => p.id === id);
       if (!cur) return;
-      if (!confirm(`${cur.enabled ? '禁用' : '启用'} 插件 ${id}？`)) return;
+      // 注意：iframe sandbox 禁用 window.confirm（返回 undefined），必须用自绘 uiConfirm
+      if (!(await uiConfirm(`${cur.enabled ? '禁用' : '启用'} 插件 ${id}？`))) return;
       const r = await api('POST', '/api/toggle', { profile: STATE.currentProfile, id, enabled: !cur.enabled });
       if (r.ok) {
         toast(`${cur.enabled ? '已禁用' : '已启用'} ${id}`);
@@ -905,8 +906,8 @@
         await loadLogs();
       } else toast('操作失败：' + r.error, 'error');
     } else if (action === 'uninstall') {
-      if (!confirm(`卸载插件 ${id}？\n会自动备份，可在「备份」里恢复。`)) return;
-      const removeFiles = confirm('同时删除本地 link 文件吗？');
+      if (!(await uiConfirm(`卸载插件 ${id}？\n会自动备份，可在「备份」里恢复。`))) return;
+      const removeFiles = await uiConfirm('同时删除本地 link 文件吗？');
       showOutput({
         id: 'pending', status: 'running',
         stdout: `⏳ 卸载 ${id}\n   profile: ${STATE.currentProfile}\n\n`, stderr: '',
