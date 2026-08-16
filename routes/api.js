@@ -916,10 +916,11 @@ export default function (app, ctx) {
 
       const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
       const profDir = profileDirOf(dshHome, profile);
-      const approveAndRetry = /allowBuilds allowlist|Ignored build scripts|approve-builds/i.test(job.stderr || '');
+      // 先跑一次 update，看 stderr 是否提到 allowBuilds（pnpm 10+ 默认拒绝 GitHub 源包跑 build）
+      // 如果是，就自动 pnpm approve-builds --all 后重试。避免 pnpm-workspace.yaml 手动维护。
+      const firstJob = await runDsh(['plugin', '--profile', profile, 'update', pkg], { cwd: profDir });
+      const approveAndRetry = /allowBuilds allowlist|Ignored build scripts|approve-builds/i.test(firstJob.stderr || '');
       if (approveAndRetry) {
-        // pnpm 10+ 默认拒绝 GitHub 源包跑 build 脚本（防恶意 postinstall）。
-        // 自动跑 `pnpm approve-builds --all`（加上缺的 allowBuilds 条目）然后重试一次。
         ctx.log?.info?.('auto-approving pnpm builds and retrying', pkg);
         const approveJob = await runDsh(['--filter', '.', 'approve-builds', '--all'], { cwd: profDir });
         if (approveJob.exitCode === 0) {
@@ -937,15 +938,15 @@ export default function (app, ctx) {
           });
         }
       }
-      const ok = job.exitCode === 0;
+      const ok = firstJob.exitCode === 0;
       appendLog(ctx.dataDir, {
         action: 'update', profile, plugin: pkg, ok,
-        jobId: job.id, exitCode: job.exitCode, durationMs: job.durationMs,
-        backupDir, stderrTail: job.stderr?.slice(-2000), stdoutTail: job.stdout?.slice(-2000),
+        jobId: firstJob.id, exitCode: firstJob.exitCode, durationMs: firstJob.durationMs,
+        backupDir, stderrTail: firstJob.stderr?.slice(-2000), stdoutTail: firstJob.stdout?.slice(-2000),
       });
       return c.json({
-        ok, pkg, backupDir, job,
-        error: ok ? undefined : ((job.error && '[spawn error] ' + job.error) || job.stderr?.trim().slice(-500) || `exit ${job.exitCode}`),
+        ok, pkg, backupDir, job: firstJob,
+        error: ok ? undefined : ((firstJob.error && '[spawn error] ' + firstJob.error) || firstJob.stderr?.trim().slice(-500) || `exit ${firstJob.exitCode}`),
       });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
