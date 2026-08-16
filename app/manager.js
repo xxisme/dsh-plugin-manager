@@ -26,6 +26,7 @@
     activeTab: 'zip',   // 当前激活的安装方式 tab
     currentJob: null,   // { id, lines, done, exitCode }
     pollTimer: null,
+    updateCache: {},   // { pkgName: { status, commitsBehind, likelyModified, ... } } 自动检查更新后的缓存（用于卡片显示魔改/落后状态）
   };
 
   // ── helpers ────────────────────────────────────────
@@ -815,6 +816,26 @@
     return `<span class="tag ${m.cls}" title="${esc(m.title)}">${m.icon} ${m.label}</span>`;
   }
 
+  // 根据 GitHub 上游检查结果给插件加可识别的魔改/落后提示标签
+  // 检查缓存来自 checkUpdatesUI() 自动填入的 STATE.updateCache
+  // 优先级：forked（本地不在上游 history，几乎肯定魔改） > 落后 N 个 commit（可能是魔改也可能是你 fork 后未拉 upstream）
+  function modifiedHint(p) {
+    const cached = STATE.updateCache && STATE.updateCache[p.id];
+    if (!cached) return null;
+    if (cached.status === 'forked') {
+      return { cls: 'modified', tag: '🛠️ 魔改', tooltip: `本地 commit 不在上游 history 中（可能是 fork 或魔改）\n本地: ${cached.localCommitShort}\n上游: ${(cached.upstream && cached.upstream.commitShort) || '?'}` };
+    }
+    if (cached.status === 'has-update' && typeof cached.commitsBehind === 'number') {
+      if (cached.commitsBehind >= 10) {
+        return { cls: 'modified', tag: '🛠️ 魔改？', tooltip: `本地落后上游 ${cached.commitsBehind} 个 commit。可能是 fork 后未拉 upstream，也可能是魔改了源码。` };
+      }
+      if (cached.commitsBehind >= 1) {
+        return { cls: 'behind', tag: `落后 ${cached.commitsBehind}`, tooltip: `上游有 ${cached.commitsBehind} 个新 commit。可能需要更新，或你魔改了源码未提交到 upstream。` };
+      }
+    }
+    return null;
+  }
+
   function renderPluginCard(p) {
     const tags = [];
     // 来源标签
@@ -823,29 +844,24 @@
     if (p.version) tags.push(`<span class="tag">${esc(p.version)}</span>`);
     // bundle 类型
     tags.push(`<span class="tag bundle">bundle</span>`);
-    // 魔改标签（独立高亮）
-    if (p.isModified) {
-      tags.push(`<span class="tag modified" title="你标记为魔改的插件——上游更新会被拦截，备份中以 blob-modified 存储">🛠️ 魔改</span>`);
-    }
+    // 自动魔改/落后提示（不靠手动标记——靠 check 更新结果推断）
+    const hint = modifiedHint(p);
+    if (hint) tags.push(`<span class="tag ${hint.cls}" title="${esc(hint.tooltip)}">${esc(hint.tag)}</span>`);
     // 启用/禁用
     tags.push(p.enabled
       ? '<span class="tag enabled">✓ enabled</span>'
       : '<span class="tag disabled">⊘ disabled</span>');
 
-    const cardCls = [p.enabled ? '' : 'disabled', p.isModified ? 'modified' : ''].filter(Boolean).join(' ');
+    const cardCls = [p.enabled ? '' : 'disabled', hint && hint.cls === 'modified' ? 'modified' : ''].filter(Boolean).join(' ');
 
     return `
       <div class="plugin-card ${cardCls}">
         <div class="plugin-name">${esc(p.id)}</div>
         <div class="plugin-meta">${tags.join('')}</div>
         ${p.detail ? `<div class="plugin-detail"><code>${esc(p.detail)}</code></div>` : ''}
-        ${p.markInfo && p.markInfo.note ? `<div class="plugin-note">📝 ${esc(p.markInfo.note)}</div>` : ''}
         <div class="plugin-actions">
           <button class="btn sm" data-action="toggle" data-id="${esc(p.id)}">
             ${p.enabled ? '⏸ 禁用' : '▶ 启用'}
-          </button>
-          <button class="btn sm ${p.isModified ? 'warn-active' : ''}" data-action="mark-modified" data-id="${esc(p.id)}">
-            ${p.isModified ? '🛠️ 已魔改 · 取消' : '🛠️ 标记魔改'}
           </button>
           <button class="btn sm danger" data-action="uninstall" data-id="${esc(p.id)}">
             🗑 卸载
@@ -879,19 +895,6 @@
         await loadPlugins(STATE.currentProfile);
         await loadLogs();
       } else toast('操作失败：' + r.error, 'error');
-    } else if (action === 'mark-modified') {
-      const cur = STATE.plugins.find((p) => p.id === id);
-      if (!cur) return;
-      const willMark = !cur.isModified;
-      const msg = willMark
-        ? `把「${id}」标记为已魔改？\n\n后续：\n· 上游 GitHub 更新会被拦截（只提醒）\n· 备份会自动升级为 blob-modified（魔改源码完整保存）`
-        : `取消「${id}」的魔改标记？\n\n后续将允许上游更新（可能覆盖你的改动）`;
-      if (!confirm(msg)) return;
-      const r = await api('POST', '/api/plugin-marks', { profile: STATE.currentProfile, pkg: id, modified: willMark });
-      if (r.ok) {
-        toast(willMark ? `🛠️ 已标记 ${id} 为魔改` : `✅ 已取消 ${id} 的魔改标记`);
-        await loadPlugins(STATE.currentProfile);
-      } else toast('标记失败：' + r.error, 'error');
     } else if (action === 'uninstall') {
       if (!confirm(`卸载插件 ${id}？\n会自动备份，可在「备份」里恢复。`)) return;
       const removeFiles = confirm('同时删除本地 link 文件吗？');
@@ -1244,8 +1247,23 @@
     const r = await api('GET', '/api/updates/check?profile=' + encodeURIComponent(profName));
     if (!r.ok) { panel.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">检查失败：' + esc(r.error) + '</div>'; return; }
 
+    // 填充 updateCache，让插件卡片显示魔改/落后标签（不需要手动标记）
+    STATE.updateCache = {};
+    for (const p of r.plugins) {
+      STATE.updateCache[p.pkg] = {
+        status: p.status,
+        commitsBehind: p.commitsBehind,
+        likelyModified: p.likelyModified,
+        localCommitShort: p.localCommitShort,
+        upstream: p.upstream,
+      };
+    }
+    // 重渲染插件卡片，让魔改/落后标签生效
+    if (STATE.currentProfile) await loadPlugins(STATE.currentProfile);
+
     const updatable = r.plugins.filter(p => p.canUpdate);
-    const modified = r.plugins.filter(p => p.isModified && p.status === 'has-update');
+    const forked = r.plugins.filter(p => p.status === 'forked');
+    const behind = r.plugins.filter(p => p.status === 'has-update' && typeof p.commitsBehind === 'number' && p.commitsBehind > 0);
     const upToDate = r.plugins.filter(p => p.status === 'up-to-date');
     const failed = r.plugins.filter(p => p.status === 'check-failed');
 
@@ -1253,9 +1271,9 @@
       <div class="glass" style="padding:10px 14px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <b style="font-size:13px">📡 GitHub 源更新检查</b>
-          <span style="font-size:11px;color:var(--text-dim)">有更新 ${updatable.length} · 已最新 ${upToDate.length}${failed.length ? ' · 失败 ' + failed.length : ''}${modified.length ? ' · 魔改提醒 ' + modified.length : ''}</span>
+          <span style="font-size:11px;color:var(--text-dim)">可更新 ${updatable.length}${forked.length ? ' · 可能魔改 ' + forked.length : ''}${behind.length ? ' · 落后 ' + behind.length : ''} · 已最新 ${upToDate.length}${failed.length ? ' · 失败 ' + failed.length : ''}</span>
         </div>
-        ${updatable.length === 0 && modified.length === 0 && failed.length === 0
+        ${updatable.length === 0 && forked.length === 0 && behind.length === 0 && failed.length === 0
           ? '<div class="empty" style="padding:8px">所有 GitHub 插件都已是最新 🎉</div>'
           : ''}
         ${updatable.map(p => `
@@ -1263,6 +1281,7 @@
             <div style="flex:1;min-width:0">
               <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
                 <span class="tag" style="font-size:10px;background:rgba(46,204,113,.15);color:#27ae60">可更新</span>
+                ${typeof p.commitsBehind === 'number' ? `<span class="tag behind" style="font-size:10px">落后 ${p.commitsBehind}</span>` : ''}
               </div>
               <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">
                 ${p.localCommitShort} → ${p.upstream.commitShort}
@@ -1274,14 +1293,24 @@
             <button class="btn sm primary" data-update-pkg="${esc(p.pkg)}">⬆ 更新</button>
           </div>
         `).join('')}
-        ${modified.map(p => `
+        ${forked.map(p => `
           <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
             <div style="flex:1;min-width:0">
               <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
-                <span class="tag" style="font-size:10px;background:rgba(241,196,15,.2);color:#b9770e">已魔改 · 只提醒</span>
+                <span class="tag modified" style="font-size:10px">🛠️ 本地不在上游 history</span>
               </div>
-              <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">${p.localCommitShort} → ${p.upstream.commitShort}</div>
-              <div style="font-size:10px;color:var(--text-dim);margin-top:2px">⚠️ 上游有更新，但你魔改过源码——更新会覆盖改动，暂不处理。请手动合并。</div>
+              <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">本地 ${p.localCommitShort} · 上游 ${p.upstream?.commitShort || '?'}</div>
+              <div style="font-size:10px;color:var(--text-dim);margin-top:2px">⚠️ 本地 commit 在上游 history 中找不到。几乎肯定是 fork 或魔改了源码（更新会覆盖，请先备份）。</div>
+            </div>
+          </div>
+        `).join('')}
+        ${behind.filter(p => !updatable.includes(p)).map(p => `
+          <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
+                <span class="tag behind" style="font-size:10px">落后 ${p.commitsBehind}</span>
+              </div>
+              <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">本地 ${p.localCommitShort} · 上游 ${p.upstream?.commitShort || '?'}</div>
             </div>
           </div>
         `).join('')}
