@@ -68,6 +68,38 @@ node_modules 里其余 128 项全是传递依赖，pnpm 能重装，不用备份
 4. **pointer 插件应用恢复**：dry-run 已生成 pnpm 命令，但 UI 的"应用恢复"只恢复了 blob 插件——pointer 插件需手动在 profile 里跑 pnpm add（或后续接 runDsh 自动执行）
 5. **工作区恢复入口**：本轮只做了工作区备份（scan + backup），恢复（restore）尚未接 UI——可从备份目录手动复制回 dsh-workspace/
 
+## GitHub 源插件更新检查（2026-08-16 追加）
+
+### 需求
+在线 GitHub 插件一键扫描版本，手动选择更新（后台 dsh 命令）；魔改过的只提醒不更新。
+
+### 实现（lib/updater.js）
+- **本地 commit**：从 pnpm-lock.yaml importers 段解析（git+ssh:#commit / codeload tar.gz/<commit>）
+- **上游 commit**：GitHub REST API `GET /repos/{owner}/{repo}/commits?per_page=1`（公共仓库无需 token，8s 超时）
+- **对比**：本地 == 上游 → up-to-date；不同 → has-update；网络失败 → check-failed
+- **魔改标记**（marks）：has-update + isModified → 只展示提醒（"上游有更新但你魔改过，暂不处理"），canUpdate=false
+- **执行更新**：`POST /api/updates/apply` → runDsh(['plugin','--profile',p,'update',pkg])，先自动备份 profile，job 异步
+
+### 端点
+| 端点 | 用途 |
+|---|---|
+| `GET /api/updates/check?profile=X` | 扫描 github 插件 + 上游对比 |
+| `POST /api/updates/apply {profile, pkg}` | 执行更新（dsh plugin update，仅限 github 源，lockfile 校验） |
+
+### UI
+插件列表顶部「🔍 检查更新」按钮 → 面板显示：可更新（commit 对比 + 上游消息 + ⬆更新按钮）/ 已魔改提醒 / 已最新 / 检查失败。
+
+### 验证（真实数据）
+- dsh-visualize：e3254f76 → dd41b388 有更新 ✓
+- dsh-better-sidebar：288a499c → ecebc978 有更新 ✓
+- dsh-usage-stats：77603ff7 == 77603ff7 已最新 ✓
+- 魔改标记：canUpdate=false，仍显示 upstream 提醒 ✓
+- HTTP + UI 全链路验证 ✓
+
+### 待决
+- **魔改标记来源**：目前 marks 为空（无 UI 入口）。后续可接：a) v2 备份的 marks；b) install-manifest.json；c) 用户在更新面板手动标"此插件我改过"
+- **GitHub API 限流**：公共仓库无 token 限流 60 次/小时/ IP——插件多时串行检查可能超限；可加本地缓存（如 1 小时）
+
 ## 经验教训
 
 - **PowerShell `Set-Content -NoNewline` 会把源码压成单行**，ESM import 全错位导致模块导出为空（routes 404 根因）——改源码一律用 write/edit 工具，同步用 node 脚本
