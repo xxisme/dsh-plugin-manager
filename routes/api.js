@@ -916,13 +916,32 @@ export default function (app, ctx) {
 
       const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
       const profDir = profileDirOf(dshHome, profile);
-      const job = await runDsh(['plugin', '--profile', profile, 'update', pkg], { cwd: profDir });
+      const approveAndRetry = /allowBuilds allowlist|Ignored build scripts|approve-builds/i.test(job.stderr || '');
+      if (approveAndRetry) {
+        // pnpm 10+ 默认拒绝 GitHub 源包跑 build 脚本（防恶意 postinstall）。
+        // 自动跑 `pnpm approve-builds --all`（加上缺的 allowBuilds 条目）然后重试一次。
+        ctx.log?.info?.('auto-approving pnpm builds and retrying', pkg);
+        const approveJob = await runDsh(['--filter', '.', 'approve-builds', '--all'], { cwd: profDir });
+        if (approveJob.exitCode === 0) {
+          const job2 = await runDsh(['plugin', '--profile', profile, 'update', pkg], { cwd: profDir });
+          const ok2 = job2.exitCode === 0;
+          appendLog(ctx.dataDir, {
+            action: 'update', profile, plugin: pkg, ok: ok2,
+            jobId: job2.id, exitCode: job2.exitCode, durationMs: job2.durationMs,
+            backupDir, autoApprovedBuilds: true,
+            stderrTail: job2.stderr?.slice(-2000), stdoutTail: job2.stdout?.slice(-2000),
+          });
+          return c.json({
+            ok: ok2, pkg, backupDir, job: job2, autoApprovedBuilds: true,
+            error: ok2 ? undefined : ((job2.error && '[spawn error] ' + job2.error) || job2.stderr?.trim().slice(-500) || `exit ${job2.exitCode}`),
+          });
+        }
+      }
       const ok = job.exitCode === 0;
       appendLog(ctx.dataDir, {
         action: 'update', profile, plugin: pkg, ok,
         jobId: job.id, exitCode: job.exitCode, durationMs: job.durationMs,
-        backupDir, // stderr/stdout 各保留最后 2000 字符（pnpm 错误提示比较长，500 不够）
-        stderrTail: job.stderr?.slice(-2000), stdoutTail: job.stdout?.slice(-2000),
+        backupDir, stderrTail: job.stderr?.slice(-2000), stdoutTail: job.stdout?.slice(-2000),
       });
       return c.json({
         ok, pkg, backupDir, job,
