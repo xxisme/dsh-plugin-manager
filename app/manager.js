@@ -821,6 +821,8 @@
   // 检查缓存来自 checkUpdatesUI() 自动填入的 STATE.updateCache
   // 优先级：forked（本地不在上游 history，几乎肯定魔改） > 落后 N 个 commit（可能是魔改也可能是你 fork 后未拉 upstream）
   function modifiedHint(p) {
+    // 手动标了 FORK（p.isModified）→ 只显示 🏷 FORK，不再叠加自动检测的 魔改/落后 提示（FORK 是更明确的语义，避免冲突）
+    if (p.isModified) return null;
     const cached = STATE.updateCache && STATE.updateCache[p.id];
     if (!cached) return null;
     if (cached.status === 'forked') {
