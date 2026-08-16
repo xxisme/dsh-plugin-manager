@@ -1386,6 +1386,7 @@
         </div>
         <div style="display:flex;gap:4px;align-items:center">
           ${p.canUpdate ? `<button class="btn sm primary" data-update-pkg="${esc(p.pkg)}">⬆ 更新</button>` : ''}
+          <button class="btn sm" data-rollback-pkg="${esc(p.pkg)}" title="还原到某个插件源备份里的版本（更新翻车后悔药）">↩ 回滚</button>
           <button class="btn sm" data-mark-pkg="${esc(p.pkg)}" data-mark-current="${p.isModified ? '1' : '0'}">
             ${p.isModified ? '🏷 取消 FORK' : '🏷 标 FORK'}
           </button>
@@ -1434,6 +1435,9 @@
     `;
     panel.querySelectorAll('[data-update-pkg]').forEach(btn => {
       btn.addEventListener('click', () => applyUpdate(btn.dataset.updatePkg, btn));
+    });
+    panel.querySelectorAll('[data-rollback-pkg]').forEach(btn => {
+      btn.addEventListener('click', () => rollbackPlugin(btn.dataset.rollbackPkg, btn));
     });
     panel.querySelectorAll('[data-mark-pkg]').forEach(btn => {
       btn.addEventListener('click', () => toggleMarkFromPanel(btn));
@@ -1568,6 +1572,52 @@
     } catch (e) {
       toast('更新异常：' + e.message, 'error');
       showUpdateErrorDetail(pkg, e.message, null, null);
+      btn.innerHTML = original;
+      btn.disabled = false;
+    }
+  }
+
+  // 回滚：把插件还原到某个插件源备份里的版本
+  async function rollbackPlugin(pkg, btn) {
+    const profName = STATE.currentProfile;
+    if (!profName) return;
+    // 1) 拉历史版本列表
+    const r = await api('GET', `/api/updates/rollback-list?profile=${encodeURIComponent(profName)}&pkg=${encodeURIComponent(pkg)}`);
+    if (!r.ok) { toast('获取回滚列表失败：' + r.error, 'error'); return; }
+    if (!r.versions.length) { toast(`没有 ${pkg} 的插件源备份，先「📦 备份插件源」`, 'warn'); return; }
+    // 2) 让用户选一个备份（uiPrompt 输入序号）
+    const lines = r.versions.map((v, i) => {
+      const ver = v.commit ? v.commit.slice(0, 12) : (v.version || '?');
+      return `${i + 1}. ${v.timestamp}  ${v.installKind}${v.hasContent ? '（含源码）' : ''}  ${ver}`;
+    });
+    const choice = await uiPrompt(
+      `↩ 回滚 ${pkg} 到以下备份版本（输入序号）：\n\n${lines.join('\n')}`,
+      { placeholder: '如 1', confirmText: '回滚' }
+    );
+    if (!choice) return;
+    const idx = parseInt(choice.trim(), 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= r.versions.length) { toast('序号无效', 'error'); return; }
+    const target = r.versions[idx];
+    // 3) 确认 + 执行
+    if (!(await uiConfirm(`回滚 ${pkg} 到 ${target.timestamp} 的版本？\n\n会先备份当前 profile（可反悔），然后重新安装该版本。`))) return;
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '⏳ 回滚中…';
+    try {
+      const rr = await api('POST', '/api/updates/rollback', { profile: profName, pkg, timestamp: target.timestamp }, { timeoutMs: 30 * 60 * 1000 });
+      if (rr.ok && rr.results && rr.results[0] && rr.results[0].ok) {
+        toast(`✅ ${pkg} 已回滚到 ${target.timestamp}`);
+        await loadPlugins(profName);
+        await loadLogs();
+        checkUpdatesUI();
+      } else {
+        const errMsg = (rr.results && rr.results[0] && rr.results[0].error) || rr.error || '回滚失败';
+        toast('回滚失败：' + errMsg, 'error');
+        btn.innerHTML = original;
+        btn.disabled = false;
+      }
+    } catch (e) {
+      toast('回滚异常：' + e.message, 'error');
       btn.innerHTML = original;
       btn.disabled = false;
     }

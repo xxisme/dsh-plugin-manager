@@ -39,7 +39,7 @@ import {
 import { detectHomes, getCurrentDshHome, setCurrentDshHome, addCustomDshHome } from '../lib/homes.js';
 import { scanProfile } from '../lib/plugin-scanner.js';
 import { backupPlugins } from '../lib/plugin-backup.js';
-import { restorePlugins, restorePluginsExec } from '../lib/plugin-restore.js';
+import { restorePlugins, restorePluginsExec, githubCommitOf } from '../lib/plugin-restore.js';
 import { scanWorkspace, backupWorkspace } from '../lib/workspace.js';
 import { checkUpdates } from '../lib/updater.js';
 import { readMarks, isMarkedModified, setMark } from '../lib/plugin-marks.js';
@@ -755,6 +755,36 @@ export default function (app, ctx) {
     return c.json({ ok: true, backups: list });
   });
 
+  // 构造真实还原执行器（/api/v2/restore 与 /api/updates/rollback 共用）
+  async function makeRestoreExec(dshHome, profile, pluginsRoot) {
+    const profDir = profileDirOf(dshHome, profile);
+    const externalDir = path.join(profDir, 'external');
+    const { addPackage } = await import('../lib/pnpm-runner.js');
+    const { addBundle } = await import('../lib/dsh-profile.js');
+    const { restoreBlobOne } = await import('../lib/plugin-restore.js');
+    return {
+      // pnpm add（cwd=profile 目录，写入 package.json + lockfile）
+      async add(specStr) {
+        const j = await addPackage(specStr, profDir);
+        return { ok: j.exitCode === 0, error: j.exitCode === 0 ? null : ((j.stderr || '').slice(-400) || `exit ${j.exitCode}`) };
+      },
+      // 注册到 dsh.profile.bundles（不写 cordis insert——bundle 层已有，避免重复加载）
+      registerBundle(pkg) {
+        addBundle(dshHome, profile, { id: pkg, depsSpec: null });
+      },
+      // blob 目标：link 插件 → external/<pkg>；其他 → node_modules/<pkg>
+      targetDirFor(spec) {
+        return spec.installKind === 'link'
+          ? path.join(externalDir, spec.pkg.replace(/^@/, '').replace(/\//g, '__'))
+          : path.join(profDir, 'node_modules', spec.pkg);
+      },
+      // 复制 content 到目标
+      async copyBlob(spec, dst) {
+        return restoreBlobOne(spec, pluginsRoot, dst);
+      },
+    };
+  }
+
   // v2 恢复预览（dry-run）：从备份 index 读 spec，生成命令
   app.post('/api/v2/restore', async (c) => {
     const { profile, timestamp, apply } = await c.req.json();
@@ -773,34 +803,8 @@ export default function (app, ctx) {
         return c.json({ ok: true, dryRun, results });
       }
       // 真实还原：pointer 执行 pnpm add，blob 复制 content + link 注册，全部注册到 bundles
-      const profDir = profileDirOf(dshHome, profile);
       const pluginsRoot = path.join(backupRoot, 'plugins');
-      const externalDir = path.join(profDir, 'external');
-      const { addPackage } = await import('../lib/pnpm-runner.js');
-      const { addBundle } = await import('../lib/dsh-profile.js');
-      const { restoreBlobOne } = await import('../lib/plugin-restore.js');
-      const exec = {
-        // pnpm add（cwd=profile 目录，写入 package.json + lockfile）
-        async add(specStr) {
-          const j = await addPackage(specStr, profDir);
-          return { ok: j.exitCode === 0, error: j.exitCode === 0 ? null : ((j.stderr || '').slice(-400) || `exit ${j.exitCode}`) };
-        },
-        // 注册到 dsh.profile.bundles（不写 cordis insert——bundle 层已有，避免重复加载）
-        registerBundle(pkg) {
-          addBundle(dshHome, profile, { id: pkg, depsSpec: null });
-        },
-        // blob 目标：link 插件 → external/<pkg>；其他 → node_modules/<pkg>
-        targetDirFor(spec) {
-          return spec.installKind === 'link'
-            ? path.join(externalDir, spec.pkg.replace(/^@/, '').replace(/\//g, '__'))
-            : path.join(profDir, 'node_modules', spec.pkg);
-        },
-        // 复制 content 到目标
-        async copyBlob(spec, dst) {
-          const r = restoreBlobOne(spec, pluginsRoot, dst);
-          return r;
-        },
-      };
+      const exec = await makeRestoreExec(dshHome, profile, pluginsRoot);
       const r = await restorePluginsExec(specs, pluginsRoot, exec);
       appendLog(ctx.dataDir, {
         action: 'restore.v2', profile, backupRoot, ok: r.ok,
@@ -1046,6 +1050,71 @@ export default function (app, ctx) {
         ok, pkg, backupDir, job: firstJob,
         error: ok ? undefined : ((firstJob.error && '[spawn error] ' + firstJob.error) || firstJob.stderr?.trim().slice(-500) || `exit ${firstJob.exitCode}`),
       });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // ── 回滚：把单个插件还原到某个插件源备份里的版本（更新翻车的后悔药）──
+  // 列出该插件在所有插件源备份中的历史版本
+  app.get('/api/updates/rollback-list', (c) => {
+    const profile = c.req.query('profile');
+    const pkg = c.req.query('pkg');
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !pkg) return c.json({ ok: false, error: 'profile/pkg 必填' }, 400);
+    const root = path.join(ctx.dataDir, 'backups', 'plugin-source', profile);
+    const versions = [];
+    if (fs.existsSync(root)) {
+      const timestamps = fs.readdirSync(root)
+        .filter((d) => fs.statSync(path.join(root, d)).isDirectory())
+        .sort()
+        .reverse(); // 新的在前
+      for (const ts of timestamps) {
+        const indexPath = path.join(root, ts, 'plugins', 'index.json');
+        if (!fs.existsSync(indexPath)) continue;
+        try {
+          const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+          const spec = (index.plugins || []).find((s) => s.pkg === pkg);
+          if (spec) {
+            versions.push({
+              timestamp: ts,
+              strategy: spec.strategy,
+              installKind: spec.installKind,
+              commit: githubCommitOf(spec.lockVersion),
+              version: spec.localVersion || null,
+              hasContent: spec.strategy !== 'pointer',
+            });
+          }
+        } catch { /* 单个备份损坏不影响其他 */ }
+      }
+    }
+    return c.json({ ok: true, pkg, versions });
+  });
+
+  // 执行回滚：用指定备份里该插件的 spec 重新安装（精确锁定当时的 commit）
+  app.post('/api/updates/rollback', async (c) => {
+    const { profile, pkg, timestamp } = await c.req.json();
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !pkg || !timestamp) return c.json({ ok: false, error: 'profile/pkg/timestamp 必填' }, 400);
+    const backupRoot = path.join(ctx.dataDir, 'backups', 'plugin-source', profile, timestamp);
+    const indexPath = path.join(backupRoot, 'plugins', 'index.json');
+    if (!fs.existsSync(indexPath)) return c.json({ ok: false, error: '备份不存在: ' + backupRoot }, 404);
+    try {
+      const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+      const spec = (index.plugins || []).find((s) => s.pkg === pkg);
+      if (!spec) return c.json({ ok: false, error: `备份 ${timestamp} 里没有插件 ${pkg}` }, 400);
+      // 回滚前先备份当前 profile（安全网，可反悔）
+      const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
+      const pluginsRoot = path.join(backupRoot, 'plugins');
+      const exec = await makeRestoreExec(dshHome, profile, pluginsRoot);
+      const r = await restorePluginsExec([spec], pluginsRoot, exec);
+      appendLog(ctx.dataDir, {
+        action: 'rollback', profile, plugin: pkg, fromTimestamp: timestamp,
+        backupDir, ok: r.ok, result: r.results[0],
+      });
+      return c.json({ ok: true, ...r, backupDir });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
     }
