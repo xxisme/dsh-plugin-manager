@@ -1223,7 +1223,9 @@ export default function (app, ctx) {
       const lockText = fs.readFileSync(lockPath, 'utf8');
       const { parseGithubDeps, parseNpmDeps } = await import('../lib/updater.js');
       const gh = parseGithubDeps(lockText);
-      const npm = parseNpmDeps(lockText);
+      // 注意：parseNpmDeps 新签名是 (profileDir, opts)——从 package.json 读直接依赖（lockfile 兜底版本）。
+      // 传 lockText 字符串会 path.join 出错 → 解析空 → 误判“非 registry 源”拒绝更新（8/16 踩过的坑）
+      const npm = parseNpmDeps(profileDirOf(dshHome, profile), { lockText });
       const isGithub = !!gh[pkg];
       const isNpm = !!npm[pkg];
       if (!isGithub && !isNpm) {
