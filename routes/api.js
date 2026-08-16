@@ -719,7 +719,7 @@ export default function (app, ctx) {
     }
   });
 
-  // 备份 v2：扫描 + 落盘到 <dataDir>/backups-v2/<profile>/<timestamp>/
+  // 备份 v2：扫描 + 落盘到 <dataDir>/backups/plugin-source/<profile>/<timestamp>/
   app.post('/api/v2/backup', async (c) => {
     const { profile, marks } = await c.req.json();
     const dshHome = currentDshHome();
@@ -731,7 +731,7 @@ export default function (app, ctx) {
       const scan = scanProfile(profileDirOf(dshHome, profile), { marks: marks || {} });
       if (!scan.ok) return c.json({ ok: false, error: scan.error }, 400);
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const backupRoot = path.join(ctx.dataDir, 'backups-v2', profile, ts);
+      const backupRoot = path.join(ctx.dataDir, 'backups', 'plugin-source', profile, ts);
       const results = backupPlugins(scan.plugins, path.join(backupRoot, 'plugins'));
       appendLog(ctx.dataDir, { action: 'backup.v2', profile, backupRoot, ok: true, plugins: results.length });
       return c.json({ ok: true, backupRoot, results });
@@ -740,9 +740,9 @@ export default function (app, ctx) {
     }
   });
 
-  // 列出 v2 备份（按 profile 分组）
+  // 列出插件源备份（按 profile 分组；workspace 在 backups/workspace/ 下，不再混入）
   app.get('/api/v2/backups', (c) => {
-    const root = path.join(ctx.dataDir, 'backups-v2');
+    const root = path.join(ctx.dataDir, 'backups', 'plugin-source');
     const list = {};
     if (fs.existsSync(root)) {
       for (const profile of fs.readdirSync(root)) {
@@ -760,7 +760,7 @@ export default function (app, ctx) {
     const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     if (!profile || !timestamp) return c.json({ ok: false, error: 'profile/timestamp 缺失' }, 400);
-    const backupRoot = path.join(ctx.dataDir, 'backups-v2', profile, timestamp);
+    const backupRoot = path.join(ctx.dataDir, 'backups', 'plugin-source', profile, timestamp);
     const indexPath = path.join(backupRoot, 'plugins', 'index.json');
     if (!fs.existsSync(indexPath)) return c.json({ ok: false, error: '备份不存在: ' + backupRoot }, 404);
     try {
@@ -789,13 +789,13 @@ export default function (app, ctx) {
     }
   });
 
-  // 备份整个工作区 → <dataDir>/backups-v2/workspace/<timestamp>/
+  // 备份整个工作区 → <dataDir>/backups/workspace/<timestamp>/
   app.post('/api/v2/workspace/backup', async (c) => {
     const { wsDir } = await c.req.json();
     const ws = wsDir || path.join(os.homedir(), 'Desktop', 'dsh-workspace');
     try {
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const backupRoot = path.join(ctx.dataDir, 'backups-v2', 'workspace', ts);
+      const backupRoot = path.join(ctx.dataDir, 'backups', 'workspace', ts);
       const r = backupWorkspace(ws, path.join(backupRoot, 'plugins'));
       if (!r.ok) return c.json({ ok: false, error: r.error }, 400);
       appendLog(ctx.dataDir, { action: 'backup.workspace', workspaceDir: ws, backupRoot, ok: true, entries: r.results.length });

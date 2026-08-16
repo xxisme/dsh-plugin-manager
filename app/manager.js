@@ -1148,7 +1148,7 @@
         </div>
         <div style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
-            <div style="font-size:11px;color:var(--text-dim)">🛠️ 工作区快照（dsh-workspace/ 魔改资产库）</div>
+            <div style="font-size:11px;color:var(--text-dim)">🛠️ 工作区快照（Desktop/dsh-workspace/）</div>
             <button class="btn sm" id="btn-v2-ws-backup">💾 备份工作区</button>
           </div>
           <div id="v2-ws-result" style="font-size:12px;max-height:180px;overflow-y:auto"></div>
