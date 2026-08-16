@@ -62,10 +62,11 @@ node_modules 里其余 128 项全是传递依赖，pnpm 能重装，不用备份
 
 ## 已知边界（未做，后续可选）
 
-1. **`marks` 魔改标记**：路由已支持 `marks` 参数（强制升级 blob-modified），UI 尚未暴露——用户改完源码后可以在未来加"标记此插件已魔改"
-2. **dsh-workspace 级快照**：`token-tracker`、补丁脚本等**独立于 profile 的资产**不在扫描范围——需要单独的"工作区快照"入口（备份 `dsh-workspace/` 目录）
+1. **✅ 已做（本轮）**：dsh-workspace 级快照——`lib/workspace.js` 备份整个 `dsh-workspace/`（13 个条目：token-tracker、补丁脚本、zip、bat 等），复用 v2 体系，落盘 `backups-v2/workspace/<ts>/`
+2. **`marks` 魔改标记**：路由已支持 `marks` 参数（强制升级 blob-modified），UI 尚未暴露——用户改完源码后可以在未来加"标记此插件已魔改"
 3. **zip 源溯源**：从 zip 装的插件，profile 不记录来源——需要 dsh-plugin-manager 安装时写 `install-manifest.json` 才能自动识别（目前会当作 registry/unknown 处理）
 4. **pointer 插件应用恢复**：dry-run 已生成 pnpm 命令，但 UI 的"应用恢复"只恢复了 blob 插件——pointer 插件需手动在 profile 里跑 pnpm add（或后续接 runDsh 自动执行）
+5. **工作区恢复入口**：本轮只做了工作区备份（scan + backup），恢复（restore）尚未接 UI——可从备份目录手动复制回 dsh-workspace/
 
 ## 经验教训
 
