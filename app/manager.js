@@ -45,13 +45,14 @@
     clearTimeout(el._t);
     el._t = setTimeout(() => { el.className = 'toast'; }, type === 'error' ? 6000 : 3500);
   }
-  async function api(method, path, body) {
+  async function api(method, path, body, opts = {}) {
     const opt = { method, headers: { 'Content-Type': 'application/json' } };
     if (TOKEN) opt.headers['Authorization'] = 'Bearer ' + TOKEN;
     if (body) opt.body = JSON.stringify(body);
-    // 10s 默认超时：fetch 不加 timeout 会一直 hang，window DOM 也就永远不更新
+    // 默认 10s 超时。install/update 这类长操作必须传 timeoutMs 跳过默认。
+    const timeoutMs = opts.timeoutMs || 10000;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 10000);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     opt.signal = ctrl.signal;
     try {
       const r = await fetch(API + path, opt);
@@ -847,12 +848,14 @@
     // 自动魔改/落后提示（不靠手动标记——靠 check 更新结果推断）
     const hint = modifiedHint(p);
     if (hint) tags.push(`<span class="tag ${hint.cls}" title="${esc(hint.tooltip)}">${esc(hint.tag)}</span>`);
+    // 手动标记的 FORK（稳定，跨重启/跨检查：来自 plugin-marks.json）
+    if (p.isModified) tags.push(`<span class="tag fork" title="你手动标记的 fork——后续上游更新会被拦截，且备份按 blob-modified 保存">🏷 FORK</span>`);
     // 启用/禁用
     tags.push(p.enabled
       ? '<span class="tag enabled">✓ enabled</span>'
       : '<span class="tag disabled">⊘ disabled</span>');
 
-    const cardCls = [p.enabled ? '' : 'disabled', hint && hint.cls === 'modified' ? 'modified' : ''].filter(Boolean).join(' ');
+    const cardCls = [p.enabled ? '' : 'disabled', hint && hint.cls === 'modified' ? 'modified' : '', p.isModified ? 'fork' : ''].filter(Boolean).join(' ');
 
     return `
       <div class="plugin-card ${cardCls}">
@@ -1150,7 +1153,8 @@
   async function v2Backup() {
     const el = $('v2-scan-result');
     el.innerHTML = '<div class="empty">备份中…（大目录可能需要一点时间）</div>';
-    const r = await api('POST', '/api/v2/backup', { profile: STATE.currentProfile });
+    // backup 可能拷贝几十 MB 魔改源码，给 10min 超时
+    const r = await api('POST', '/api/v2/backup', { profile: STATE.currentProfile }, { timeoutMs: 10 * 60 * 1000 });
     if (!r.ok) { el.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">备份失败：' + esc(r.error) + '</div>'; return; }
     const okCount = r.results.filter(x => x.ok).length;
     const failCount = r.results.filter(x => !x.ok).length;
@@ -1224,7 +1228,8 @@
     `;
     $('btn-v2-ws-confirm').addEventListener('click', async () => {
       el.innerHTML = '<div class="empty">备份中…（约 30MB，需几秒）</div>';
-      const r = await api('POST', '/api/v2/workspace/backup', {});
+      // workspace 备份几十 MB，给 10min 超时
+      const r = await api('POST', '/api/v2/workspace/backup', {}, { timeoutMs: 10 * 60 * 1000 });
       if (!r.ok) { el.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">备份失败：' + esc(r.error) + '</div>'; return; }
       const ok = r.results.filter(x => x.ok).length;
       const total = (r.results.reduce((a, x) => a + (x.bytes || 0), 0) / 1024 / 1024).toFixed(1);
@@ -1263,57 +1268,53 @@
 
     const updatable = r.plugins.filter(p => p.canUpdate);
     const forked = r.plugins.filter(p => p.status === 'forked');
-    const behind = r.plugins.filter(p => p.status === 'has-update' && typeof p.commitsBehind === 'number' && p.commitsBehind > 0);
+    const behind = r.plugins.filter(p => p.status === 'has-update' && typeof p.commitsBehind === 'number' && p.commitsBehind > 0 && !p.canUpdate);
     const upToDate = r.plugins.filter(p => p.status === 'up-to-date');
     const failed = r.plugins.filter(p => p.status === 'check-failed');
+
+    // 给所有 github 插件都渲染一行，包含 FORK 切换按钮
+    const renderRow = (p, opts = {}) => `
+      <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
+            ${opts.statusTag || ''}
+            ${p.isModified ? '<span class="tag fork" style="font-size:10px">🏷 FORK</span>' : ''}
+          </div>
+          <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">${p.localCommitShort || '?'} → ${p.upstream?.commitShort || '?'}</div>
+          ${opts.subline || ''}
+        </div>
+        <div style="display:flex;gap:4px;align-items:center">
+          ${p.canUpdate ? `<button class="btn sm primary" data-update-pkg="${esc(p.pkg)}">⬆ 更新</button>` : ''}
+          <button class="btn sm" data-mark-pkg="${esc(p.pkg)}" data-mark-current="${p.isModified ? '1' : '0'}">
+            ${p.isModified ? '🏷 取消 FORK' : '🏷 标 FORK'}
+          </button>
+        </div>
+      </div>
+    `;
 
     panel.innerHTML = `
       <div class="glass" style="padding:10px 14px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <b style="font-size:13px">📡 GitHub 源更新检查</b>
-          <span style="font-size:11px;color:var(--text-dim)">可更新 ${updatable.length}${forked.length ? ' · 可能魔改 ' + forked.length : ''}${behind.length ? ' · 落后 ' + behind.length : ''} · 已最新 ${upToDate.length}${failed.length ? ' · 失败 ' + failed.length : ''}</span>
+          <span style="font-size:11px;color:var(--text-dim)">可更新 ${updatable.length}${forked.length ? ' · 本地不在 history ' + forked.length : ''}${behind.length ? ' · 落后 ' + behind.length : ''} · 已最新 ${upToDate.length}${failed.length ? ' · 失败 ' + failed.length : ''}</span>
         </div>
         ${updatable.length === 0 && forked.length === 0 && behind.length === 0 && failed.length === 0
           ? '<div class="empty" style="padding:8px">所有 GitHub 插件都已是最新 🎉</div>'
           : ''}
-        ${updatable.map(p => `
-          <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
-            <div style="flex:1;min-width:0">
-              <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
-                <span class="tag" style="font-size:10px;background:rgba(46,204,113,.15);color:#27ae60">可更新</span>
-                ${typeof p.commitsBehind === 'number' ? `<span class="tag behind" style="font-size:10px">落后 ${p.commitsBehind}</span>` : ''}
-              </div>
-              <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">
-                ${p.localCommitShort} → ${p.upstream.commitShort}
-              </div>
-              <div style="font-size:10px;color:var(--text-dim);margin-top:2px">
-                ${esc(p.upstream.message || '')} <span style="color:var(--text-faint)">${esc(p.upstream.date || '')}</span>
-              </div>
-            </div>
-            <button class="btn sm primary" data-update-pkg="${esc(p.pkg)}">⬆ 更新</button>
-          </div>
-        `).join('')}
-        ${forked.map(p => `
-          <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
-            <div style="flex:1;min-width:0">
-              <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
-                <span class="tag modified" style="font-size:10px">🛠️ 本地不在上游 history</span>
-              </div>
-              <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">本地 ${p.localCommitShort} · 上游 ${p.upstream?.commitShort || '?'}</div>
-              <div style="font-size:10px;color:var(--text-dim);margin-top:2px">⚠️ 本地 commit 在上游 history 中找不到。几乎肯定是 fork 或魔改了源码（更新会覆盖，请先备份）。</div>
-            </div>
-          </div>
-        `).join('')}
-        ${behind.filter(p => !updatable.includes(p)).map(p => `
-          <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
-            <div style="flex:1;min-width:0">
-              <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
-                <span class="tag behind" style="font-size:10px">落后 ${p.commitsBehind}</span>
-              </div>
-              <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">本地 ${p.localCommitShort} · 上游 ${p.upstream?.commitShort || '?'}</div>
-            </div>
-          </div>
-        `).join('')}
+        ${updatable.map(p => renderRow(p, {
+          statusTag: '<span class="tag" style="font-size:10px;background:rgba(46,204,113,.15);color:#27ae60">可更新</span>' + (typeof p.commitsBehind === 'number' ? `<span class="tag behind" style="font-size:10px">落后 ${p.commitsBehind}</span>` : ''),
+          subline: `<div style="font-size:10px;color:var(--text-dim);margin-top:2px">${esc(p.upstream?.message || '')} <span style="color:var(--text-faint)">${esc(p.upstream?.date || '')}</span></div>`,
+        })).join('')}
+        ${forked.map(p => renderRow(p, {
+          statusTag: '<span class="tag modified" style="font-size:10px">🛠️ 本地不在上游 history</span>',
+          subline: '<div style="font-size:10px;color:var(--text-dim);margin-top:2px">⚠️ 本地 commit 在上游 history 中找不到。几乎肯定是 fork 或魔改了源码（更新会覆盖，请先备份）。</div>',
+        })).join('')}
+        ${behind.map(p => renderRow(p, {
+          statusTag: `<span class="tag behind" style="font-size:10px">落后 ${p.commitsBehind}</span>`,
+        })).join('')}
+        ${upToDate.map(p => renderRow(p, {
+          statusTag: '<span class="tag" style="font-size:10px;background:rgba(46,204,113,.1);color:#27ae60">✓ 已最新</span>',
+        })).join('')}
         ${failed.map(p => `
           <div style="padding:6px 0;border-top:1px solid var(--border,#ddd);font-size:11px;color:var(--text-dim)">
             ⚠️ ${esc(p.pkg)}：${esc(p.upstreamError || '检查失败')}
@@ -1324,6 +1325,29 @@
     panel.querySelectorAll('[data-update-pkg]').forEach(btn => {
       btn.addEventListener('click', () => applyUpdate(btn.dataset.updatePkg, btn));
     });
+    panel.querySelectorAll('[data-mark-pkg]').forEach(btn => {
+      btn.addEventListener('click', () => toggleMarkFromPanel(btn));
+    });
+  }
+
+  // 检查更新面板里的 FORK 标记切换（POST /api/plugin-marks + 重渲染）
+  async function toggleMarkFromPanel(btn) {
+    const pkg = btn.dataset.markPkg;
+    const cur = btn.dataset.markCurrent === '1';
+    const willMark = !cur;
+    if (willMark) {
+      const ok = await uiConfirm(`把 ${pkg} 标记为 🏷 FORK？\n\n后果：\n· 卡片永久显示 🏷 FORK 标签（紫色）\n· 上游 GitHub 更新被拦截（只显示不更新）\n· 备份按 blob-modified（魔改源码完整保存）`);
+      if (!ok) return;
+    }
+    btn.disabled = true;
+    const r = await api('POST', '/api/plugin-marks', { profile: STATE.currentProfile, pkg, modified: willMark });
+    btn.disabled = false;
+    if (r.ok) {
+      toast(willMark ? `🏷 ${pkg} 已标记 FORK` : `✅ ${pkg} FORK 已取消`);
+      await checkUpdatesUI();
+    } else {
+      toast('标记失败：' + (r.error || '未知错误'), 'error');
+    }
   }
 
   // 执行单个插件更新（后台 job）
@@ -1335,7 +1359,8 @@
     btn.disabled = true;
     btn.innerHTML = '⏳ 更新中…';
     try {
-      const r = await api('POST', '/api/updates/apply', { profile: profName, pkg });
+      // update 是后台 job（pnpm install + pnpm reload），耗时长。用 30min 超时避免 10s 默认超时误报"更新异常"。
+      const r = await api('POST', '/api/updates/apply', { profile: profName, pkg }, { timeoutMs: 30 * 60 * 1000 });
       if (!r.ok) { toast('更新失败：' + (r.error || '未知错误'), 'error'); return; }
       if (r.ok && r.job && r.job.exitCode === 0) {
         toast(`✅ ${pkg} 已更新`);

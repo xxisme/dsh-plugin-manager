@@ -564,6 +564,8 @@ button { cursor: pointer; font-family: inherit; font-size: inherit; }
 .tag.bundle { background: var(--accent-soft); color: var(--accent-text); }
 .tag.modified { background: rgba(255, 87, 34, 0.18); color: #c6421c; border: 1px solid rgba(255, 87, 34, 0.4); }
 .tag.behind { background: rgba(255, 193, 7, 0.15); color: #b8860b; border: 1px solid rgba(255, 193, 7, 0.35); }
+.tag.fork { background: rgba(156, 39, 176, 0.15); color: #6a1b9a; border: 1px solid rgba(156, 39, 176, 0.4); }
+.plugin-card.fork { box-shadow: inset 4px 0 0 rgba(156, 39, 176, 0.7); }
 .tag.enabled { background: var(--green-soft); color: var(--green); }
 .tag.disabled { background: var(--gray-soft); color: var(--text-faint); }
 .tag.unknown { background: var(--gray-soft); color: var(--text-faint); }
