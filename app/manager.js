@@ -1138,6 +1138,7 @@
         </div>
         ${profName ? `
         <div style="display:flex;gap:8px;margin-bottom:10px">
+          <button class="btn sm" id="btn-open-backups-dir">📂 打开备份文件夹</button>
           <button class="btn sm" id="btn-v2-scan">🔍 扫描预览</button>
           <button class="btn sm primary" id="btn-v2-backup">💾 立即备份</button>
         </div>
@@ -1159,12 +1160,20 @@
     m.addEventListener('click', closeModal);
 
     if (profName) {
+      $('btn-open-backups-dir').addEventListener('click', openBackupsDir);
       $('btn-v2-scan').addEventListener('click', () => v2Scan());
       $('btn-v2-backup').addEventListener('click', () => v2Backup());
       const wsBtn = $('btn-v2-ws-backup');
       if (wsBtn) wsBtn.addEventListener('click', () => v2WorkspaceBackup());
       loadV2History();
     }
+  }
+
+  // 一键打开备份根目录（<dataDir>/backups）到 OS 文件管理器
+  async function openBackupsDir() {
+    const r = await api('POST', '/api/open-backups-dir');
+    if (r.ok) toast('📂 已打开：' + r.path);
+    else toast('打开失败：' + (r.error || '未知错误'), 'error');
   }
 
   // 扫描预览：列出每个插件的策略 + 指纹 + 大小

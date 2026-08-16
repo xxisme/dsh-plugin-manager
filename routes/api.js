@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import {
   listProfiles,
   listPlugins,
@@ -784,6 +785,24 @@ export default function (app, ctx) {
     try {
       const r = scanWorkspace(wsDir);
       return c.json({ ok: r.ok, ...(r.ok ? { workspaceDir: r.workspaceDir, entries: r.entries } : { error: r.error }) });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // 一键打开备份根目录到 OS 文件管理器（Windows: explorer / macOS: open / Linux: xdg-open）
+  // 不接受任意 path 参数——固定打开 <dataDir>/backups，防任意路径打开的风险
+  app.post('/api/open-backups-dir', async (c) => {
+    const target = path.join(ctx.dataDir, 'backups');
+    try {
+      if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+      const cmd = process.platform === 'win32' ? 'explorer.exe'
+ : process.platform === 'darwin' ? 'open'
+ : 'xdg-open';
+      const proc = spawn(cmd, [target], { detached: true, stdio: 'ignore' });
+      proc.on('error', () => { /* 可能环境无文件管理器，忽略 */ });
+      proc.unref();
+      return c.json({ ok: true, path: target });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
     }
