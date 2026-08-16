@@ -381,7 +381,9 @@
           await loadPlugins(STATE.currentProfile);
           await loadLogs();
         } else {
-          toast(`安装失败：${res.error || 'exit ' + res.job.exitCode}`, 'error');
+          // 错误明细在下方「执行输出」框里，toast 只给摘要
+          const hint = res.autoApprovedBuilds ? '（已自动批准 build script 后仍失败）' : '';
+          toast(`安装失败${hint}：${res.error || 'exit ' + res.job.exitCode}`, 'error');
         }
       } else {
         showOutput({ id: 'err', status: 'error', stdout: '', stderr: res.error || '未知错误' });
