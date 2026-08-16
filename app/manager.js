@@ -1269,6 +1269,44 @@
         upstream: p.upstream,
       };
     }
+
+    // 后端查完后，如果用户设了 GitHub Token 且有些插件 check-failed（限流），前端补查一次。
+    // 补查不依赖后端转发——前端 fetch 直连 GitHub（GitHub API 默认允许 * CORS）。
+    // 这样就算后端不重启、前端热更新也能解限流问题。
+    const localToken = (typeof localStorage !== 'undefined') ? localStorage.getItem('github_token') : null;
+    if (localToken) {
+      const needRefetch = r.plugins.filter(p => p.status === 'check-failed' && (p.upstreamError || '').includes('限流'));
+      for (const p of needRefetch) {
+        const repo = (p.pkg && p.specifier) ? (extractRepo(p.specifier) || p.repo) : p.repo;
+        if (!repo) continue;
+        const fixed = await fetchUpstreamFromFrontend(repo, localToken);
+        if (fixed.ok) {
+          // 重算 status / commitsBehind / likelyModified
+          const upstream = fixed.latest;
+          const history = fixed.history;
+          const localInHist = history.findIndex(c => c.sha === p.localCommit);
+          let status;
+          if (upstream.commit === p.localCommit) status = 'up-to-date';
+          else if (localInHist < 0) status = 'forked';
+          else status = 'has-update';
+          const commitsBehind = (status === 'has-update' && localInHist >= 0) ? localInHist : null;
+          // 更新原 plugin 对象 + cache
+          p.status = status;
+          p.canUpdate = status === 'has-update' && !p.isModified;
+          p.upstream = upstream;
+          p.upstreamError = null;
+          p.historyError = null;
+          p.commitsBehind = commitsBehind;
+          p.likelyModified = status === 'forked';
+          p.localCommitInHistory = localInHist >= 0 ? { index: localInHist, historySize: history.length, date: history[localInHist].date, message: history[localInHist].message } : null;
+          STATE.updateCache[p.pkg] = {
+            status, commitsBehind, likelyModified: p.likelyModified,
+            localCommitShort: p.localCommitShort, upstream: p.upstream,
+          };
+        }
+      }
+    }
+
     // 重渲染插件卡片，让魔改/落后标签生效
     if (STATE.currentProfile) await loadPlugins(STATE.currentProfile);
 
@@ -1298,11 +1336,11 @@
       </div>
     `;
 
-    // GitHub token 状态（贴不进去面板头部，让用户一眼看到）
-    const tokenStatus = await api('GET', '/api/github-token/status');
-    const tokenHint = tokenStatus.ok && tokenStatus.hasToken
-      ? `<span style="color:#27ae60">✓ 已配置（${esc(tokenStatus.masked || 'token')}）</span> · <a href="#" data-action="clear-token" style="color:#c0392b">清除</a>`
-      : `<span style="color:#b8860b">⚠ 未配置（限流 60/h，加 token 后 5000/h）</span> · <a href="#" data-action="set-token" style="color:#2c3e50">设置</a>`;
+    // GitHub token 状态：直接读 localStorage（后端转发可能没生效）
+    const hasLocalToken = (typeof localStorage !== 'undefined') && !!localStorage.getItem('github_token');
+    const tokenHint = hasLocalToken
+      ? `<span style="color:#27ae60">✓ 已设置（存在浏览器 localStorage）</span> · <a href="#" data-action="clear-token" style="color:#c0392b">清除</a>`
+      : `<span style="color:#b8860b">⚠ 未设置（限流 60/h，加 token 后 5000/h）</span> · <a href="#" data-action="set-token" style="color:#2c3e50">设置</a>`;
 
     panel.innerHTML = `
       <div class="glass" style="padding:10px 14px">
@@ -1350,25 +1388,78 @@
       a.addEventListener('click', async (e) => {
         e.preventDefault();
         if (!await uiConfirm('清除 GitHub Token？\n清除后恢复未认证限流 60 req/hour。')) return;
-        const r = await api('DELETE', '/api/github-token');
-        if (r.ok) { toast('✅ Token 已清除'); checkUpdatesUI(); }
-        else toast('清除失败：' + r.error, 'error');
+        try {
+          localStorage.removeItem('github_token');
+          toast('✅ Token 已清除');
+          checkUpdatesUI();
+        } catch (err) { toast('清除失败：' + err.message, 'error'); }
       });
     });
   }
 
   // 在检查更新面板里输入 GitHub Token（设置后限流 5000/h）
-  // 使用 prompt 让用户输入 token。token 存在 <dataDir>/github-token 明文（仅本地）
+  // 使用 prompt 让用户输入 token。token 存 localStorage（仅前端），不依赖后端转发。
+  // 后端仅用于"是否已设"状态检查（可选）。点 “设置”后前端会拿 token 直连 GitHub API 重查。
   async function promptSetToken() {
-    const cur = await api('GET', '/api/github-token/status');
-    const curTip = cur.ok && cur.hasToken ? `（当前：${cur.masked || '已设置'}）\n\n` : '';
+    const cur = (typeof localStorage !== 'undefined') ? localStorage.getItem('github_token') : null;
+    const curTip = cur ? '（当前已设置）\n\n' : '';
     const token = window.prompt(
       `输入 GitHub Personal Access Token (PAT)\n\n${curTip}要求：\n· 公共仓库读取权限（public_repo 勾选）\n· 最低粒度：不需 repo/admin 任何权限\n\n获取：github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → 只勾 public_repo\n\n粘贴 token 下方：`
     );
     if (!token) return;
-    const r = await api('POST', '/api/github-token', { token: token.trim() });
-    if (r.ok) { toast('✅ Token 已保存，下次检查更新生效'); checkUpdatesUI(); }
-    else toast('保存失败：' + r.error, 'error');
+    try {
+      localStorage.setItem('github_token', token.trim());
+      toast('✅ Token 已存到浏览器 localStorage，下次检查更新生效');
+      checkUpdatesUI();
+    } catch (e) {
+      toast('保存失败：' + e.message, 'error');
+    }
+  }
+
+  // 提取 github:owner/repo 或 codeload URL 里的 owner/repo
+  function extractRepo(specifier) {
+    if (!specifier) return null;
+    let m = specifier.match(/github\.com[/:]([^/]+\/[^/#]+?)(?:\.git)?(?:#|$)/);
+    if (m) return m[1].replace(/\.git$/, '');
+    m = specifier.match(/codeload\.github\.com\/([^/]+\/[^/]+)\/tar\.gz\//);
+    if (m) return m[1];
+    m = specifier.match(/^github:([^/]+\/[^/#]+)/);
+    if (m) return m[1];
+    return null;
+  }
+
+  // 前端直连 GitHub API（带 token）重查单个仓库。同时拉最新 commit + history。
+  // 返回 { ok, latest:{commit,date,message}, history:[{sha,date,message}] } 或 { ok:false, error }
+  async function fetchUpstreamFromFrontend(repo, token) {
+    try {
+      const h = { 'user-agent': 'dsh-plugin-manager', accept: 'application/vnd.github+json' };
+      if (token) h.authorization = `Bearer ${token}`;
+      // latest commit
+      const r1 = await fetch(`https://api.github.com/repos/${repo}/commits?per_page=1`, { headers: h });
+      if (!r1.ok) {
+        const reset = parseInt(r1.headers.get('x-ratelimit-reset') || '0', 10);
+        const waitMin = reset > 0 ? Math.ceil((reset * 1000 - Date.now()) / 60000) : '?';
+        return { ok: false, error: r1.status === 403 ? `GitHub 限流 — ${waitMin} 分钟后恢复` : `HTTP ${r1.status}` };
+      }
+      const j1 = await r1.json();
+      const latest = {
+        commit: j1[0]?.sha,
+        date: j1[0]?.commit?.committer?.date,
+        message: j1[0]?.commit?.message?.split('\n')[0] || '',
+      };
+      // history
+      const r2 = await fetch(`https://api.github.com/repos/${repo}/commits?per_page=100`, { headers: h });
+      const j2 = r2.ok ? await r2.json() : [];
+      const history = Array.isArray(j2) ? j2.slice(0, 100).map(c => ({
+        sha: c.sha,
+        date: c.commit?.committer?.date,
+        message: c.commit?.message?.split('\n')[0] || '',
+      })) : [];
+      if (!latest.commit) return { ok: false, error: '响应缺少 commit' };
+      return { ok: true, latest, history };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
   }
 
   // 检查更新面板里的 FORK 标记切换（POST /api/plugin-marks + 重渲染）
