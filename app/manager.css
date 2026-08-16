@@ -483,6 +483,35 @@ button { cursor: pointer; font-family: inherit; font-size: inherit; }
 .plugin-card.disabled .plugin-name {
   color: var(--text-dim);
 }
+.plugin-card.modified {
+  border-color: rgba(255, 87, 34, 0.5);
+  background: linear-gradient(to bottom, rgba(255, 87, 34, 0.04), var(--bg-card));
+}
+.plugin-card.modified::before {
+  content: "魔改";
+  position: absolute;
+  top: -8px;
+  right: 10px;
+  background: rgba(255, 87, 34, 0.95);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.plugin-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  padding: 4px 8px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  font-style: italic;
+}
+.btn.warn-active { background: rgba(255, 87, 34, 0.15); color: #c6421c; border-color: rgba(255, 87, 34, 0.4); }
+.btn.warn-active:hover { background: rgba(255, 87, 34, 0.25); }
 
 .plugin-name {
   font-weight: 600;
@@ -533,6 +562,7 @@ button { cursor: pointer; font-family: inherit; font-size: inherit; }
 .tag.link { background: var(--accent-soft); color: var(--accent-text); }
 .tag.local { background: rgba(8, 145, 178, 0.10); color: #0891b2; }
 .tag.bundle { background: var(--accent-soft); color: var(--accent-text); }
+.tag.modified { background: rgba(255, 87, 34, 0.18); color: #c6421c; border: 1px solid rgba(255, 87, 34, 0.4); }
 .tag.enabled { background: var(--green-soft); color: var(--green); }
 .tag.disabled { background: var(--gray-soft); color: var(--text-faint); }
 .tag.unknown { background: var(--gray-soft); color: var(--text-faint); }

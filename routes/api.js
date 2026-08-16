@@ -41,6 +41,7 @@ import { backupPlugins } from '../lib/plugin-backup.js';
 import { restorePlugins } from '../lib/plugin-restore.js';
 import { scanWorkspace, backupWorkspace } from '../lib/workspace.js';
 import { checkUpdates } from '../lib/updater.js';
+import { readMarks, isMarkedModified, setMark } from '../lib/plugin-marks.js';
 import {
   pnpmAvailable,
   install,
@@ -307,7 +308,7 @@ export default function (app, ctx) {
       return c.json({ ok: false, error: `profile 不存在: ${profileName}` }, 404);
     }
     try {
-      const data = listPlugins(dshHome, profileName);
+      const data = listPlugins(dshHome, profileName, ctx.dataDir);
       return c.json({ ok: true, profile: profileName, ...data });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
@@ -793,6 +794,31 @@ export default function (app, ctx) {
     }
   });
 
+  // ── 插件魔改标记（用户手动标记：profile/pkg → modified） ──────────────
+  // 读取所有 marks（含/不魔改的所有入口；返回 list 给前端渲染）
+  app.get('/api/plugin-marks', (c) => {
+    const profile = c.req.query('profile') || null;
+    const marks = readMarks(ctx.dataDir);
+    if (!profile) return c.json({ ok: true, marks });
+    const filtered = {};
+    for (const [k, v] of Object.entries(marks)) {
+      if (k.startsWith(profile + '/')) filtered[k] = v;
+    }
+    return c.json({ ok: true, marks: filtered });
+  });
+
+  // 设置/取消标记
+  app.post('/api/plugin-marks', async (c) => {
+    const { profile, pkg, modified, note } = await c.req.json();
+    if (!profile || !pkg) return c.json({ ok: false, error: 'profile/pkg 必填' }, 400);
+    try {
+      const entry = setMark(ctx.dataDir, profile, pkg, !!modified, note ? { note } : {});
+      return c.json({ ok: true, modified: !!modified, entry });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
   // ── GitHub 源插件更新检查 / 执行 ──────────────
   // 扫描 profile 的 github 插件，查上游最新 commit，对比本地（有更新/已最新/失败）
   app.get('/api/updates/check', async (c) => {
@@ -803,8 +829,16 @@ export default function (app, ctx) {
       return c.json({ ok: false, error: 'profile 不存在: ' + profile }, 400);
     }
     try {
-      // 魔改标记：从 v2 backup 的 marks 读取（目前无 UI 标记，先留空；后续接 install-manifest）
-      const r = await checkUpdates(profileDirOf(dshHome, profile), { marks: {} });
+      // 魔改标记：从 plugin-marks.json 读（用户手动标记的“已魔改”插件），
+      // 让 update check 能提醒但不提供更新按钮
+      const allMarks = readMarks(ctx.dataDir);
+      const profileMarks = {};
+      for (const [k, v] of Object.entries(allMarks)) {
+        if (k.startsWith(profile + '/') && v.modified) {
+          profileMarks[k.slice(profile.length + 1)] = true;
+        }
+      }
+      const r = await checkUpdates(profileDirOf(dshHome, profile), { marks: profileMarks });
       if (!r.ok) return c.json({ ok: false, error: r.error }, 400);
       return c.json({ ok: true, ...r });
     } catch (e) {

@@ -798,23 +798,54 @@
     });
   }
 
+  // 来源标签映射：不同 installKind 显示不同 emoji + 中文
+  // 保持与 backup v2 分类一致（pointer 优先于 file/git/tarball 的语义）
+  function sourceTag(p) {
+    const map = {
+      'link':    { icon: '🔗', label: 'link',    cls: 'link',    title: '本地目录链接（你改这里会影响原目录）' },
+      'github':  { icon: '🟦', label: 'github',  cls: 'github',  title: 'GitHub 源' },
+      'git':     { icon: '🟦', label: 'github',  cls: 'github',  title: 'Git 源' },
+      'url':     { icon: '🔗', label: 'url',     cls: 'github',  title: 'URL 源' },
+      'npm':     { icon: '📦', label: 'npm',     cls: 'npm',     title: 'npm registry 源' },
+      'file':    { icon: '📁', label: 'file',    cls: 'local',   title: '本地文件' },
+      'folder':  { icon: '📂', label: 'folder',  cls: 'local',   title: '本地目录' },
+      'unknown': { icon: '❓', label: 'unknown', cls: 'unknown', title: '未知来源' },
+    };
+    const m = map[p.source] || map['unknown'];
+    return `<span class="tag ${m.cls}" title="${esc(m.title)}">${m.icon} ${m.label}</span>`;
+  }
+
   function renderPluginCard(p) {
     const tags = [];
-    if (p.source && p.source !== 'unknown') tags.push(`<span class="tag ${esc(p.source)}">${esc(p.source)}</span>`);
+    // 来源标签
+    tags.push(sourceTag(p));
+    // 版本号
     if (p.version) tags.push(`<span class="tag">${esc(p.version)}</span>`);
+    // bundle 类型
     tags.push(`<span class="tag bundle">bundle</span>`);
+    // 魔改标签（独立高亮）
+    if (p.isModified) {
+      tags.push(`<span class="tag modified" title="你标记为魔改的插件——上游更新会被拦截，备份中以 blob-modified 存储">🛠️ 魔改</span>`);
+    }
+    // 启用/禁用
     tags.push(p.enabled
       ? '<span class="tag enabled">✓ enabled</span>'
       : '<span class="tag disabled">⊘ disabled</span>');
 
+    const cardCls = [p.enabled ? '' : 'disabled', p.isModified ? 'modified' : ''].filter(Boolean).join(' ');
+
     return `
-      <div class="plugin-card ${p.enabled ? '' : 'disabled'}">
+      <div class="plugin-card ${cardCls}">
         <div class="plugin-name">${esc(p.id)}</div>
         <div class="plugin-meta">${tags.join('')}</div>
         ${p.detail ? `<div class="plugin-detail"><code>${esc(p.detail)}</code></div>` : ''}
+        ${p.markInfo && p.markInfo.note ? `<div class="plugin-note">📝 ${esc(p.markInfo.note)}</div>` : ''}
         <div class="plugin-actions">
           <button class="btn sm" data-action="toggle" data-id="${esc(p.id)}">
             ${p.enabled ? '⏸ 禁用' : '▶ 启用'}
+          </button>
+          <button class="btn sm ${p.isModified ? 'warn-active' : ''}" data-action="mark-modified" data-id="${esc(p.id)}">
+            ${p.isModified ? '🛠️ 已魔改 · 取消' : '🛠️ 标记魔改'}
           </button>
           <button class="btn sm danger" data-action="uninstall" data-id="${esc(p.id)}">
             🗑 卸载
@@ -848,6 +879,19 @@
         await loadPlugins(STATE.currentProfile);
         await loadLogs();
       } else toast('操作失败：' + r.error, 'error');
+    } else if (action === 'mark-modified') {
+      const cur = STATE.plugins.find((p) => p.id === id);
+      if (!cur) return;
+      const willMark = !cur.isModified;
+      const msg = willMark
+        ? `把「${id}」标记为已魔改？\n\n后续：\n· 上游 GitHub 更新会被拦截（只提醒）\n· 备份会自动升级为 blob-modified（魔改源码完整保存）`
+        : `取消「${id}」的魔改标记？\n\n后续将允许上游更新（可能覆盖你的改动）`;
+      if (!confirm(msg)) return;
+      const r = await api('POST', '/api/plugin-marks', { profile: STATE.currentProfile, pkg: id, modified: willMark });
+      if (r.ok) {
+        toast(willMark ? `🛠️ 已标记 ${id} 为魔改` : `✅ 已取消 ${id} 的魔改标记`);
+        await loadPlugins(STATE.currentProfile);
+      } else toast('标记失败：' + r.error, 'error');
     } else if (action === 'uninstall') {
       if (!confirm(`卸载插件 ${id}？\n会自动备份，可在「备份」里恢复。`)) return;
       const removeFiles = confirm('同时删除本地 link 文件吗？');
