@@ -252,6 +252,7 @@
         <input type="checkbox" id="zip-force"> 目标已存在时强制覆盖
       </label>
       <div id="zip-info" class="install-info" style="display:none"></div>
+      <div id="zip-result" style="margin-top:10px"></div>
     `;
   }
 
@@ -645,29 +646,32 @@
     const btn = $('zip-install-btn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> 安装中…';
+    // 清空上次的报告/输出
+    const zipResult = $('zip-result');
+    if (zipResult) zipResult.innerHTML = '';
+    $('output-section').style.display = 'none';
 
     try {
-      // 先开 job 占位（让 UI 立刻有进度条）
-      showOutput({
-        id: 'pending', status: 'running',
-        stdout: `⏳ 准备安装 ${zipPath}\n   profile: ${STATE.currentProfile}\n\n`, stderr: '',
-      });
-
       const r = await api('POST', '/api/install/zip', {
         profile: STATE.currentProfile,
         zipPath,
         force,
       });
 
-      // 体检不通过（4xx + precheck）→ 直接显示报告，不进入安装流程
+      // 体检不通过 → 在原位显示体检报告，不进入安装流程（不显示执行输出框/进度条）
       if (!r.ok && r.precheck) {
-        $('output-section').style.display = 'block';
-        $('output-log').innerHTML = renderPrecheckReport(r.precheck);
+        if (zipResult) zipResult.innerHTML = renderPrecheckReport(r.precheck);
         toast('体检不通过：' + r.error, 'error');
         btn.disabled = false;
         btn.innerHTML = '📦 安装';
         return;
       }
+
+      // 体检通过或无 precheck 字段 → 走安装流程
+      showOutput({
+        id: 'pending', status: 'running',
+        stdout: `⏳ 准备安装 ${zipPath}\n   profile: ${STATE.currentProfile}\n\n`, stderr: '',
+      });
 
       if (r.job && r.job.id) {
         // 切到真实 job
@@ -681,9 +685,10 @@
       }
 
       if (r.ok) {
-        // 如果体检有 warnings（非阻塞）， toast 提示
+        // 如果体检有 warnings（非阻塞）， 在原位报告区提示
         if (r.precheckWarnings && r.precheckWarnings.length) {
-          toast(`⚠️ 安装成功但有 ${r.precheckWarnings.length} 个警告，请查看输出`, 'warn');
+          if (zipResult) zipResult.innerHTML = `<div style="background:rgba(255,193,7,.12);border-left:3px solid #b8860b;padding:10px;border-radius:4px;font-size:12px"><b>⚠️ 安装成功但有 ${r.precheckWarnings.length} 个警告：</b><ul style="margin:6px 0 0 18px">${r.precheckWarnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>`;
+          toast(`⚠️ 安装成功但有 ${r.precheckWarnings.length} 个警告，请查看下方`, 'warn');
         }
         toast(`✅ 安装成功: ${r.pluginName}`);
         await loadPlugins(STATE.currentProfile);
