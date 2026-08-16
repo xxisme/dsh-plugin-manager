@@ -1298,10 +1298,19 @@
       </div>
     `;
 
+    // GitHub token 状态（贴不进去面板头部，让用户一眼看到）
+    const tokenStatus = await api('GET', '/api/github-token/status');
+    const tokenHint = tokenStatus.ok && tokenStatus.hasToken
+      ? `<span style="color:#27ae60">✓ 已配置（${esc(tokenStatus.masked || 'token')}）</span> · <a href="#" data-action="clear-token" style="color:#c0392b">清除</a>`
+      : `<span style="color:#b8860b">⚠ 未配置（限流 60/h，加 token 后 5000/h）</span> · <a href="#" data-action="set-token" style="color:#2c3e50">设置</a>`;
+
     panel.innerHTML = `
       <div class="glass" style="padding:10px 14px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:6px">
           <b style="font-size:13px">📡 GitHub 源更新检查</b>
+          <span style="font-size:11px">🔑 Token: ${tokenHint}</span>
+        </div>
+        <div style="margin-bottom:8px">
           <span style="font-size:11px;color:var(--text-dim)">可更新 ${updatable.length}${forked.length ? ' · 本地不在 history ' + forked.length : ''}${behind.length ? ' · 落后 ' + behind.length : ''} · 已最新 ${upToDate.length}${failed.length ? ' · 失败 ' + failed.length : ''}</span>
         </div>
         ${updatable.length === 0 && forked.length === 0 && behind.length === 0 && failed.length === 0
@@ -1334,6 +1343,32 @@
     panel.querySelectorAll('[data-mark-pkg]').forEach(btn => {
       btn.addEventListener('click', () => toggleMarkFromPanel(btn));
     });
+    panel.querySelectorAll('[data-action="set-token"]').forEach(a => {
+      a.addEventListener('click', (e) => { e.preventDefault(); promptSetToken(); });
+    });
+    panel.querySelectorAll('[data-action="clear-token"]').forEach(a => {
+      a.addEventListener('click', async (e) => {
+        e.preventDefault();
+        if (!await uiConfirm('清除 GitHub Token？\n清除后恢复未认证限流 60 req/hour。')) return;
+        const r = await api('DELETE', '/api/github-token');
+        if (r.ok) { toast('✅ Token 已清除'); checkUpdatesUI(); }
+        else toast('清除失败：' + r.error, 'error');
+      });
+    });
+  }
+
+  // 在检查更新面板里输入 GitHub Token（设置后限流 5000/h）
+  // 使用 prompt 让用户输入 token。token 存在 <dataDir>/github-token 明文（仅本地）
+  async function promptSetToken() {
+    const cur = await api('GET', '/api/github-token/status');
+    const curTip = cur.ok && cur.hasToken ? `（当前：${cur.masked || '已设置'}）\n\n` : '';
+    const token = window.prompt(
+      `输入 GitHub Personal Access Token (PAT)\n\n${curTip}要求：\n· 公共仓库读取权限（public_repo 勾选）\n· 最低粒度：不需 repo/admin 任何权限\n\n获取：github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → 只勾 public_repo\n\n粘贴 token 下方：`
+    );
+    if (!token) return;
+    const r = await api('POST', '/api/github-token', { token: token.trim() });
+    if (r.ok) { toast('✅ Token 已保存，下次检查更新生效'); checkUpdatesUI(); }
+    else toast('保存失败：' + r.error, 'error');
   }
 
   // 检查更新面板里的 FORK 标记切换（POST /api/plugin-marks + 重渲染）

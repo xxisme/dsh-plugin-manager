@@ -819,8 +819,49 @@ export default function (app, ctx) {
     }
   });
 
-  // ── GitHub 源插件更新检查 / 执行 ──────────────
+  // ── GitHub token 配置 ─────────────────
+  // 存在 <dataDir>/github-token 明文。用户不会推 GitHub，但 PAT 能提高查询限流。
+  app.get('/api/github-token/status', (c) => {
+    const tokenPath = path.join(ctx.dataDir, 'github-token');
+    const exists = fs.existsSync(tokenPath);
+    let masked = null;
+    if (exists) {
+      try {
+        const t = fs.readFileSync(tokenPath, 'utf8').trim();
+        if (t) masked = t.length > 8 ? t.slice(0, 4) + '…' + t.slice(-4) : '•••';
+      } catch { /* ignore */ }
+    }
+    return c.json({ ok: true, hasToken: !!process.env.GITHUB_TOKEN || exists, masked, fromEnv: !!process.env.GITHUB_TOKEN });
+  });
+  app.post('/api/github-token', async (c) => {
+    const { token } = await c.req.json();
+    if (!token || typeof token !== 'string' || token.length < 10) {
+      return c.json({ ok: false, error: 'token 无效（至少 10 字符）' }, 400);
+    }
+    try {
+      fs.writeFileSync(path.join(ctx.dataDir, 'github-token'), token.trim(), { mode: 0o600 });
+      // 清除更新检查缓存，让下一次 fetch 带新 token
+      updateCheckCache.clear();
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+  app.delete('/api/github-token', (c) => {
+    try {
+      const p = path.join(ctx.dataDir, 'github-token');
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+      updateCheckCache.clear();
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+// ── GitHub 源插件更新检查 / 执行 ──────────────
   // 扫描 profile 的 github 插件，查上游最新 commit，对比本地（有更新/已最新/失败）
+  // 缓存 5 分钟（避免用户连点检查更新造成 GitHub 限流）
+  const updateCheckCache = new Map(); // key: `${dshHome}|${profile}` -> { at, result }
   app.get('/api/updates/check', async (c) => {
     const profile = c.req.query('profile');
     const dshHome = currentDshHome();
@@ -829,6 +870,12 @@ export default function (app, ctx) {
       return c.json({ ok: false, error: 'profile 不存在: ' + profile }, 400);
     }
     try {
+      const cacheKey = `${dshHome}|${profile}`;
+      const hit = updateCheckCache.get(cacheKey);
+      // 5min 缓存：但如果上游全部是限流失败（check-failed 且 error 含限流），3 分钟后才重试
+      if (hit && Date.now() - hit.at < (hit.likelyRateLimited ? 3 * 60 * 1000 : 5 * 60 * 1000)) {
+        return c.json({ ok: true, ...hit.result, _cache: { hit: true, age: Math.floor((Date.now() - hit.at) / 1000) } });
+      }
       // 魔改标记：从 plugin-marks.json 读（用户手动标记的“已魔改”插件），
       // 让 update check 能提醒但不提供更新按钮
       const allMarks = readMarks(ctx.dataDir);
@@ -838,8 +885,12 @@ export default function (app, ctx) {
           profileMarks[k.slice(profile.length + 1)] = true;
         }
       }
-      const r = await checkUpdates(profileDirOf(dshHome, profile), { marks: profileMarks });
+      // 透传 dataDir 让 updater 读 github-token
+      const r = await checkUpdates(profileDirOf(dshHome, profile), { marks: profileMarks, dataDir: ctx.dataDir });
       if (!r.ok) return c.json({ ok: false, error: r.error }, 400);
+      // 检查是否全部限流 → 压缩缓存时间（避免用户连点重试浪费请求）
+      const likelyRateLimited = r.plugins.length > 0 && r.plugins.every(p => p.status === 'check-failed' && (p.upstreamError || '').includes('限流'));
+      updateCheckCache.set(cacheKey, { at: Date.now(), result: r, likelyRateLimited });
       return c.json({ ok: true, ...r });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
