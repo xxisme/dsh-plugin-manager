@@ -35,6 +35,7 @@ import {
   deleteBackup,
   cleanupOldBackups,
 } from '../lib/backup.js';
+import { detectHomes, getCurrentDshHome, setCurrentDshHome, addCustomDshHome } from '../lib/homes.js';
 import {
   pnpmAvailable,
   install,
@@ -124,9 +125,46 @@ function renderShell(c, ctx) {
 
 // ─── Routes ─────────────────────────────────────
 export default function (app, ctx) {
+  // 当前选定的 DSH_HOME。优先读持久化选择，其次探测 env / ~/.dsh。
+  // 所有路由都通过这个 helper 拿 home，不再直接调 resolveDshHome。
+  function currentDshHome() {
+    const sel = getCurrentDshHome(ctx.dataDir);
+    return sel || resolveDshHome();
+  }
+
   // 页面
   app.get('/manager', (c) => renderShell(c, ctx));
   app.get('/page', (c) => renderShell(c, ctx));
+
+  // 列出候选 DSH home + 当前选择
+  app.get('/api/homes', (c) => {
+    const homes = detectHomes(ctx.dataDir);
+    return c.json({ ok: true, ...homes });
+  });
+
+  // 切换当前 home（持久化到 plugin-data/dsh-plugin-manager/current-home.json）
+  app.post('/api/current-home', async (c) => {
+    const { dshHome } = await c.req.json();
+    try {
+      setCurrentDshHome(ctx.dataDir, dshHome);
+      // 切换后清掉 status 缓存，下次 GET /api/status 会重新探测
+      statusCache = { at: 0, data: null };
+      return c.json({ ok: true, dshHome });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 400);
+    }
+  });
+
+  // 添加用户自定义 home 路径
+  app.post('/api/custom-home', async (c) => {
+    const { dshHome } = await c.req.json();
+    try {
+      const p = addCustomDshHome(ctx.dataDir, dshHome);
+      return c.json({ ok: true, dshHome: p });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 400);
+    }
+  });
 
   // 状态缓存：探测 DSH_HOME 路径 + dsh web 服务端口。不 spawn dsh/pnpm 进程
   // （spawn 跟 hana 进程 PATH 交接本来就脆弱，而且 install 动作现走 runDsh()）。
@@ -141,7 +179,7 @@ export default function (app, ctx) {
     if (statusCache.data && now - statusCache.at < 60000) {
       return { ...statusCache.data, _cache: { hit: true, age: cacheAge, calls: statusCallCount } };
     }
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     const dshHomeExists = dshHome ? fs.existsSync(dshHome) : false;
 
     // 并行探测：DSH web 服务 + dsh/npm 依赖 (allSettled 一个挂了不影响其他)。
@@ -250,14 +288,14 @@ export default function (app, ctx) {
 
   // 列出所有 profile
   app.get('/api/profiles', (c) => {
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     return c.json({ ok: true, dshHome, profiles: listProfiles(dshHome) });
   });
 
   // 列出 profile 下所有 plugin
   app.get('/api/plugins/:profile', (c) => {
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     const profileName = c.req.param('profile');
     if (!profileExists(dshHome, profileName)) {
@@ -279,7 +317,7 @@ export default function (app, ctx) {
   // 手动备份当前 profile（命名规则与自动备份一致：YYYYMMDD-HHmmss-profile）
   app.post('/api/backup', async (c) => {
     const { profile } = await c.req.json();
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     if (!profile || !profileExists(dshHome, profile)) {
       return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
@@ -354,7 +392,7 @@ export default function (app, ctx) {
   // ─── 安装本地 zip：解压 + dsh plugin add link: ───
   app.post('/api/install/zip', async (c) => {
     const { profile, zipPath, force } = await c.req.json();
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     if (!profile || !profileExists(dshHome, profile)) {
       return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
@@ -477,7 +515,7 @@ export default function (app, ctx) {
   // ─── 执行用户给的 dsh plugin 命令 ───
   app.post('/api/install/cmd', async (c) => {
     const { profile, command } = await c.req.json();
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
 
     // 解析 + 白名单验证
@@ -558,7 +596,7 @@ export default function (app, ctx) {
   // 卸载（直接调 dsh plugin remove）
   app.post('/api/uninstall', async (c) => {
     const { profile, id, removeFiles } = await c.req.json();
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     if (!profile || !profileExists(dshHome, profile)) {
       return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
@@ -606,7 +644,7 @@ export default function (app, ctx) {
   // 启用/禁用（直接改 cordis.patch.yml，不需要 pnpm install）
   app.post('/api/toggle', async (c) => {
     const { profile, id, enabled } = await c.req.json();
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     if (!profile || !profileExists(dshHome, profile)) {
       return c.json({ ok: false, error: `profile 不存在: ${profile}` }, 400);
@@ -629,7 +667,7 @@ export default function (app, ctx) {
   // 恢复备份
   app.post('/api/restore', async (c) => {
     const { backupDir, profile } = await c.req.json();
-    const dshHome = resolveDshHome();
+    const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
     if (!backupDir || !fs.existsSync(backupDir)) {
       return c.json({ ok: false, error: `备份目录不存在: ${backupDir}` }, 400);

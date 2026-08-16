@@ -22,6 +22,7 @@
     plugins: [],
     extras: [],
     status: null,
+    homes: { current: null, candidates: [] },  // 候选 home + 当前选择
     activeTab: 'zip',   // 当前激活的安装方式 tab
     currentJob: null,   // { id, lines, done, exitCode }
     pollTimer: null,
@@ -91,15 +92,27 @@
   function render() {
     // 状态条文本从 STATE.status 读（任何时候 render 都反映当前状态）
     const s = STATE.status;
-    const dshHomeText = s?.dshHome
-      ? (s.dshHome + (s.dshHomeExists ? '' : ' (不存在!)'))
-      : '初次加载中…';
+    const currentHome = STATE.homes.current;
+    const dshHomeText = currentHome
+      ? currentHome
+      : (s?.dshHome || '初次加载中…');
     const dshWebHud = s?.dshWeb?.ok
       ? `<span class="pulse"></span> dsh web :${esc(String(s.dshWeb.port))}${s.dshWeb.version ? ' ' + esc(s.dshWeb.version) : ''}`
       : `<span class="pulse off"></span> dsh web ${s?.dshWeb ? '离线' : '检测中…'}`;
     const pnpmHud = s?.pnpm?.ok
       ? `<span class="pulse"></span> pnpm ${esc(s.pnpm.version)}`
       : `<span class="pulse off"></span> pnpm ${s?.pnpm ? '不可用' : '检测中…'}`;
+
+    // Home 切换器：顶栏多出一个下拉
+    const candidates = STATE.homes.candidates || [];
+    const homeLabel = currentHome
+      ? (STATE.homes.candidates.find(c => c.path === currentHome)?.label || currentHome)
+      : '选择 home…';
+    const homeSwitcher = `
+      <button class="btn sm" id="btn-home-switch" title="${esc(currentHome || '')}">
+        🏠 ${esc(homeLabel)} ▼
+      </button>
+    `;
 
     $('root').innerHTML = `
       <div class="hdr">
@@ -116,6 +129,7 @@
           <span class="path-value" id="dsh-home">${esc(dshHomeText)}</span>
         </div>
         <div class="actions">
+          ${homeSwitcher}
           <button class="btn sm" id="btn-refresh">🔄 刷新</button>
           <button class="btn sm" id="btn-backups">🗄️ 备份</button>
         </div>
@@ -181,6 +195,7 @@
 
     $('btn-refresh').addEventListener('click', loadAll);
     $('btn-backups').addEventListener('click', openBackupsModal);
+    if ($('btn-home-switch')) $('btn-home-switch').addEventListener('click', openHomeSwitcher);
 
     // profile list clicks
     bindProfileList();
@@ -599,6 +614,8 @@
       // 之前 Promise.all([loadStatus, loadProfiles]) 在 render() 之前，
       // loadStatus 里 $('dsh-home').textContent = ... 会拿到 null 静默抛错。
       render();
+      // 先读候选 home（决定 status / profiles 的查询目标），再并行加载 status / profiles
+      await loadHomes();
       // 并行加载 status / profiles（status 被设了 60s 后端缓存）
       await Promise.all([loadStatus(), loadProfiles()]);
       // profile 可能刚被选中、install panel 还显示“未选”——需要重渲染
@@ -613,6 +630,97 @@
       console.error('loadAll failed:', e);
       toast('加载失败: ' + e.message, 'error');
     }
+  }
+
+  // 探测候选 DSH home + 当前选择
+  async function loadHomes() {
+    try {
+      const r = await api('GET', '/api/homes');
+      if (r.ok) {
+        STATE.homes = { current: r.current, candidates: r.candidates || [] };
+      }
+    } catch (e) {
+      console.warn('loadHomes failed:', e);
+    }
+  }
+
+  // 切换 home：请求后端 → 重读候选 → 重载所有数据 → 重渲染
+  async function switchHome(newPath) {
+    const r = await api('POST', '/api/current-home', { dshHome: newPath });
+    if (!r.ok) return toast('切换失败：' + r.error, 'error');
+    toast('已切换 home：' + newPath);
+    // 重读候选（current 变了），重载状态 / profile / 插件
+    await loadHomes();
+    STATE.currentProfile = null;  // 清空当前 profile 选择（home 换了，profile 不一定存在）
+    STATE.profiles = [];
+    STATE.plugins = [];
+    STATE.status = null;
+    await loadAll();
+  }
+
+  // 顶栏 home 切换器：下拉选择 / 添加自定义
+  async function openHomeSwitcher() {
+    const homes = STATE.homes;
+    const candidates = homes.candidates || [];
+    const cur = homes.current;
+    const m = $('modal');
+    m.innerHTML = `
+      <div class="modal" onclick="event.stopPropagation()">
+        <h3>🏠 切换 DSH_HOME</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:12px">
+          DSH 在不同位置可能有多个独立 home（默认 ~/.dsh、dsh-hanako 插件隔离 home 等）。
+          在此选择本次管理的 home，切换后插件列表会重新加载。
+        </div>
+        <div id="home-list">
+          ${candidates.map(c => `
+            <label class="home-item" style="display:flex;align-items:flex-start;gap:10px;padding:8px;border-radius:6px;cursor:pointer;${c.path === cur ? 'background:var(--bg-info, rgba(0,0,0,.06));' : ''}">
+              <input type="radio" name="home" value="${esc(c.path)}" ${c.path === cur ? 'checked' : ''} ${c.exists ? '' : 'disabled'} />
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:500">${esc(c.label)}${c.exists ? '' : ' <span style="color:var(--text-faint);font-size:11px">(无效/不存在)</span>'}</div>
+                <div style="font-size:11px;color:var(--text-dim);word-break:break-all">${esc(c.path)}</div>
+                <div style="font-size:10px;color:var(--text-faint)">来源: ${esc(c.source)}</div>
+              </div>
+            </label>
+          `).join('')}
+        </div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">添加自定义 home 路径</div>
+          <div style="display:flex;gap:6px">
+            <input type="text" id="custom-home-path" placeholder="C:\\path\\to\\dsh-home" style="flex:1;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input, transparent);color:var(--text)" />
+            <button class="btn sm" id="btn-add-custom-home">添加</button>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" onclick="document.getElementById('modal').classList.remove('show')">取消</button>
+          <button class="btn primary" id="btn-apply-home">应用所选</button>
+        </div>
+      </div>
+    `;
+    m.classList.add('show');
+    m.addEventListener('click', closeModal);
+
+    $('btn-add-custom-home').addEventListener('click', async () => {
+      const p = $('custom-home-path').value.trim();
+      if (!p) return toast('路径不能为空', 'error');
+      const r = await api('POST', '/api/custom-home', { dshHome: p });
+      if (!r.ok) return toast('添加失败：' + r.error, 'error');
+      toast('已添加：' + r.dshHome);
+      await loadHomes();
+      closeModal();
+      openHomeSwitcher();
+    });
+
+    $('btn-apply-home').addEventListener('click', async () => {
+      const sel = m.querySelector('input[name=home]:checked');
+      if (!sel) return toast('请选择一个 home', 'error');
+      const newPath = sel.value;
+      if (newPath === cur) {
+        closeModal();
+        return;
+      }
+      closeModal();
+      await switchHome(newPath);
+    });
   }
 
   async function loadStatus() {
