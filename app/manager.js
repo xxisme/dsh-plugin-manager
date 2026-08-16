@@ -976,6 +976,43 @@
     });
   }
 
+  // ── 自制输入框（代替 window.prompt）────────────────
+  // iframe 沙箱里 window.prompt 也被禁用。opts: { placeholder, defaultValue, multiline=false, confirmText='确认' }
+  // 返回 string（输入内容）或 null（取消）
+  function uiPrompt(msg, opts = {}) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      const multiline = opts.multiline === true;
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;' +
+        'display:flex;align-items:center;justify-content:center';
+      const inputStyle = 'width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border,#ccc);' +
+        'border-radius:6px;font-family:monospace;font-size:13px;background:var(--bg,#fafafa);color:var(--text,#222)';
+      overlay.innerHTML = `
+        <div style="background:var(--bg-card,#fff);border:1px solid var(--border,#ddd);border-radius:12px;
+          padding:20px 24px;max-width:560px;min-width:340px;box-shadow:0 8px 30px rgba(0,0,0,.25)">
+          <div style="font-size:13px;line-height:1.65;color:var(--text,#222);margin-bottom:12px;white-space:pre-wrap">${esc(msg)}</div>
+          ${multiline
+            ? `<textarea data-i rows="6" style="${inputStyle};resize:vertical">${esc(opts.defaultValue || '')}</textarea>`
+            : `<input data-i type="text" placeholder="${esc(opts.placeholder || '')}" value="${esc(opts.defaultValue || '')}" style="${inputStyle}">`}
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+            <button class="btn ghost" data-c="cancel">取消</button>
+            <button class="btn primary" data-c="ok">${esc(opts.confirmText || '确认')}</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const input = overlay.querySelector('[data-i]');
+      setTimeout(() => { input.focus(); if (!multiline && input.select) input.select(); }, 50);
+      const done = (v) => { overlay.remove(); resolve(v); };
+      overlay.querySelector('[data-c="cancel"]').addEventListener('click', () => done(null));
+      overlay.querySelector('[data-c="ok"]').addEventListener('click', () => done(input.value));
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) done(null); });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !multiline) { e.preventDefault(); done(input.value); }
+        if (e.key === 'Escape') { e.preventDefault(); done(null); }
+      });
+    });
+  }
+
   // ── 备份 modal ────────────────────────────────────
   async function openBackupsModal() {
     const r = await api('GET', '/api/backups');
@@ -1403,8 +1440,10 @@
   async function promptSetToken() {
     const cur = (typeof localStorage !== 'undefined') ? localStorage.getItem('github_token') : null;
     const curTip = cur ? '（当前已设置）\n\n' : '';
-    const token = window.prompt(
-      `输入 GitHub Personal Access Token (PAT)\n\n${curTip}要求：\n· 公共仓库读取权限（public_repo 勾选）\n· 最低粒度：不需 repo/admin 任何权限\n\n获取：github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → 只勾 public_repo\n\n粘贴 token 下方：`
+    // 用 uiPrompt 代替 window.prompt（iframe sandbox 里 prompt 被禁用）
+    const token = await uiPrompt(
+      `输入 GitHub Personal Access Token (PAT)\n\n${curTip}要求：\n· 公共仓库读取权限（public_repo 勾选）\n· 最低粒度：不需 repo/admin 任何权限\n\n获取：github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → 只勾 public_repo`,
+      { placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', confirmText: '保存' }
     );
     if (!token) return;
     try {
