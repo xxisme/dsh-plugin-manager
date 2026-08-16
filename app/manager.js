@@ -801,7 +801,7 @@
   }
 
   // 来源标签映射：不同 installKind 显示不同 emoji + 中文
-  // 保持与 backup v2 分类一致（pointer 优先于 file/git/tarball 的语义）
+  // 保持与 backup 策略分类一致（pointer 优先于 file/git/tarball 的语义）
   function sourceTag(p) {
     const map = {
       'link':    { icon: '🔗', label: 'link',    cls: 'link',    title: '本地目录链接（你改这里会影响原目录）' },
@@ -1120,7 +1120,7 @@
 
   function closeModal() { $('modal').classList.remove('show'); $('modal').innerHTML = ''; }
 
-  // ── 备份 v2：插件源备份 modal ─────────────────────
+  // ── 插件源备份 modal ─────────────────────
   // 三策略：pointer（只存指针）/ blob-raw（原物）/ blob-modified（魔改源码）
   // 流程：扫描预览 → 确认备份 → 列历史 → dry-run 恢复预览 → apply
   async function openV2Modal() {
@@ -1129,7 +1129,7 @@
     m.innerHTML = `
       <div class="modal" onclick="event.stopPropagation()">
         <h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <span>📦 插件源备份 v2</span>
+          <span>📦 插件源备份</span>
           <button class="btn sm ghost" onclick="document.getElementById('modal').classList.remove('show')">✕</button>
         </h3>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;line-height:1.6">
@@ -1143,7 +1143,7 @@
         </div>
         <div id="v2-scan-result" style="font-size:12px;max-height:220px;overflow-y:auto;margin-bottom:10px"></div>
         <div style="border-top:1px solid var(--border);padding-top:10px">
-          <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">历史 v2 备份：</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">历史备份：</div>
           <div id="v2-history" style="font-size:12px;max-height:180px;overflow-y:auto">加载中…</div>
         </div>
         <div style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
@@ -1212,14 +1212,14 @@
     loadV2History();
   }
 
-  // 历史 v2 备份 + 恢复入口
+  // 历史备份 + 恢复入口
   async function loadV2History() {
     const el = $('v2-history');
     if (!el) return;
     const r = await api('GET', '/api/v2/backups');
     if (!r.ok) { el.innerHTML = '<div class="empty">' + esc(r.error) + '</div>'; return; }
     const list = (r.backups && r.backups[STATE.currentProfile]) || [];
-    if (list.length === 0) { el.innerHTML = '<div class="empty">暂无 v2 备份</div>'; return; }
+    if (list.length === 0) { el.innerHTML = '<div class="empty">暂无备份</div>'; return; }
     el.innerHTML = list.map(ts => `
       <div class="glass" style="padding:8px 12px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:8px">
         <span style="font-family:monospace;font-size:11px">${esc(ts)}</span>
