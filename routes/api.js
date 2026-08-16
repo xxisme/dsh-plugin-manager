@@ -40,6 +40,7 @@ import { scanProfile } from '../lib/plugin-scanner.js';
 import { backupPlugins } from '../lib/plugin-backup.js';
 import { restorePlugins } from '../lib/plugin-restore.js';
 import { scanWorkspace, backupWorkspace } from '../lib/workspace.js';
+import { checkUpdates } from '../lib/updater.js';
 import {
   pnpmAvailable,
   install,
@@ -787,6 +788,60 @@ export default function (app, ctx) {
       if (!r.ok) return c.json({ ok: false, error: r.error }, 400);
       appendLog(ctx.dataDir, { action: 'backup.workspace', workspaceDir: ws, backupRoot, ok: true, entries: r.results.length });
       return c.json({ ok: true, backupRoot, results: r.results });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // ── GitHub 源插件更新检查 / 执行 ──────────────
+  // 扫描 profile 的 github 插件，查上游最新 commit，对比本地（有更新/已最新/失败）
+  app.get('/api/updates/check', async (c) => {
+    const profile = c.req.query('profile');
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: 'profile 不存在: ' + profile }, 400);
+    }
+    try {
+      // 魔改标记：从 v2 backup 的 marks 读取（目前无 UI 标记，先留空；后续接 install-manifest）
+      const r = await checkUpdates(profileDirOf(dshHome, profile), { marks: {} });
+      if (!r.ok) return c.json({ ok: false, error: r.error }, 400);
+      return c.json({ ok: true, ...r });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // 执行更新：dsh plugin update（后台 job，前端轮询）
+  app.post('/api/updates/apply', async (c) => {
+    const { profile, pkg } = await c.req.json();
+    const dshHome = currentDshHome();
+    if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
+    if (!profile || !profileExists(dshHome, profile)) {
+      return c.json({ ok: false, error: 'profile 不存在: ' + profile }, 400);
+    }
+    if (!pkg) return c.json({ ok: false, error: 'pkg 必填' }, 400);
+    // 安全：只允许 github 源插件（用 lockfile 校验），避免误更新 npm/link 插件
+    try {
+      const lockPath = path.join(profileDirOf(dshHome, profile), 'pnpm-lock.yaml');
+      const lockText = fs.readFileSync(lockPath, 'utf8');
+      const { parseGithubDeps } = await import('../lib/updater.js');
+      const gh = parseGithubDeps(lockText);
+      if (!gh[pkg]) return c.json({ ok: false, error: '不是 GitHub 源插件，拒绝更新' }, 400);
+
+      const backupDir = backupProfile(ctx.dataDir, dshHome, profile);
+      const profDir = profileDirOf(dshHome, profile);
+      const job = await runDsh(['plugin', '--profile', profile, 'update', pkg], { cwd: profDir });
+      const ok = job.exitCode === 0;
+      appendLog(ctx.dataDir, {
+        action: 'update', profile, plugin: pkg, ok,
+        jobId: job.id, exitCode: job.exitCode, durationMs: job.durationMs,
+        backupDir, stderrTail: job.stderr?.slice(-500), stdoutTail: job.stdout?.slice(-500),
+      });
+      return c.json({
+        ok, pkg, backupDir, job,
+        error: ok ? undefined : ((job.error && '[spawn error] ' + job.error) || job.stderr?.trim().slice(-500) || `exit ${job.exitCode}`),
+      });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
     }

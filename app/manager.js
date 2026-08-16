@@ -175,7 +175,9 @@
             <div class="plugins-hdr">
               <h2 id="plugins-title">已装插件</h2>
               <div class="plugins-stats" id="plugins-stats"></div>
+              <button class="btn sm" id="btn-check-updates" style="margin-left:auto">🔍 检查更新</button>
             </div>
+            <div id="update-panel" style="display:none;margin-bottom:10px"></div>
             <div id="plugins-content">
               <div class="empty">选择左侧 profile</div>
             </div>
@@ -198,6 +200,7 @@
     $('btn-backups').addEventListener('click', openBackupsModal);
     $('btn-v2').addEventListener('click', openV2Modal);
     if ($('btn-home-switch')) $('btn-home-switch').addEventListener('click', openHomeSwitcher);
+    if ($('btn-check-updates')) $('btn-check-updates').addEventListener('click', checkUpdatesUI);
 
     // profile list clicks
     bindProfileList();
@@ -1184,6 +1187,98 @@
       `;
       loadV2History();
     });
+  }
+
+  // ── GitHub 源插件更新检查 / 执行 ──────────────
+  // 扫描 profile 的 github 插件 → 查上游最新 commit → 展示：有更新（可更新/魔改提醒）/ 已最新 / 失败
+  async function checkUpdatesUI() {
+    const profName = STATE.currentProfile;
+    if (!profName) { toast('先选择 profile', 'error'); return; }
+    const panel = $('update-panel');
+    panel.style.display = 'block';
+    panel.innerHTML = '<div class="empty">🔍 检查中…（访问 GitHub API，稍候）</div>';
+    const r = await api('GET', '/api/updates/check?profile=' + encodeURIComponent(profName));
+    if (!r.ok) { panel.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">检查失败：' + esc(r.error) + '</div>'; return; }
+
+    const updatable = r.plugins.filter(p => p.canUpdate);
+    const modified = r.plugins.filter(p => p.isModified && p.status === 'has-update');
+    const upToDate = r.plugins.filter(p => p.status === 'up-to-date');
+    const failed = r.plugins.filter(p => p.status === 'check-failed');
+
+    panel.innerHTML = `
+      <div class="glass" style="padding:10px 14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <b style="font-size:13px">📡 GitHub 源更新检查</b>
+          <span style="font-size:11px;color:var(--text-dim)">有更新 ${updatable.length} · 已最新 ${upToDate.length}${failed.length ? ' · 失败 ' + failed.length : ''}${modified.length ? ' · 魔改提醒 ' + modified.length : ''}</span>
+        </div>
+        ${updatable.length === 0 && modified.length === 0 && failed.length === 0
+          ? '<div class="empty" style="padding:8px">所有 GitHub 插件都已是最新 🎉</div>'
+          : ''}
+        ${updatable.map(p => `
+          <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
+                <span class="tag" style="font-size:10px;background:rgba(46,204,113,.15);color:#27ae60">可更新</span>
+              </div>
+              <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">
+                ${p.localCommitShort} → ${p.upstream.commitShort}
+              </div>
+              <div style="font-size:10px;color:var(--text-dim);margin-top:2px">
+                ${esc(p.upstream.message || '')} <span style="color:var(--text-faint)">${esc(p.upstream.date || '')}</span>
+              </div>
+            </div>
+            <button class="btn sm primary" data-update-pkg="${esc(p.pkg)}">⬆ 更新</button>
+          </div>
+        `).join('')}
+        ${modified.map(p => `
+          <div class="upd-row" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border,#ddd)">
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:500;font-size:12px">${esc(p.pkg)}
+                <span class="tag" style="font-size:10px;background:rgba(241,196,15,.2);color:#b9770e">已魔改 · 只提醒</span>
+              </div>
+              <div style="font-size:10px;color:var(--text-faint);font-family:monospace;margin-top:2px">${p.localCommitShort} → ${p.upstream.commitShort}</div>
+              <div style="font-size:10px;color:var(--text-dim);margin-top:2px">⚠️ 上游有更新，但你魔改过源码——更新会覆盖改动，暂不处理。请手动合并。</div>
+            </div>
+          </div>
+        `).join('')}
+        ${failed.map(p => `
+          <div style="padding:6px 0;border-top:1px solid var(--border,#ddd);font-size:11px;color:var(--text-dim)">
+            ⚠️ ${esc(p.pkg)}：${esc(p.upstreamError || '检查失败')}
+          </div>
+        `).join('')}
+      </div>
+    `;
+    panel.querySelectorAll('[data-update-pkg]').forEach(btn => {
+      btn.addEventListener('click', () => applyUpdate(btn.dataset.updatePkg, btn));
+    });
+  }
+
+  // 执行单个插件更新（后台 job）
+  async function applyUpdate(pkg, btn) {
+    if (!(await uiConfirm(`更新 ${pkg}？\n\n会先自动备份当前 profile，然后执行 dsh plugin update ${pkg}。\n更新可能改变插件行为——建议先确认上游改动。`))) return;
+    const profName = STATE.currentProfile;
+    if (!profName) return;
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '⏳ 更新中…';
+    try {
+      const r = await api('POST', '/api/updates/apply', { profile: profName, pkg });
+      if (!r.ok) { toast('更新失败：' + (r.error || '未知错误'), 'error'); return; }
+      if (r.ok && r.job && r.job.exitCode === 0) {
+        toast(`✅ ${pkg} 已更新`);
+        await loadPlugins(profName);
+        await loadLogs();
+        checkUpdatesUI();
+      } else {
+        toast(`更新失败：${r.error || ('exit ' + (r.job && r.job.exitCode))}`, 'error');
+        btn.innerHTML = original;
+        btn.disabled = false;
+      }
+    } catch (e) {
+      toast('更新异常：' + e.message, 'error');
+      btn.innerHTML = original;
+      btn.disabled = false;
+    }
   }
 
   // ── 启动 ──────────────────────────────────────────
