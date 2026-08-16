@@ -39,6 +39,7 @@ import { detectHomes, getCurrentDshHome, setCurrentDshHome, addCustomDshHome } f
 import { scanProfile } from '../lib/plugin-scanner.js';
 import { backupPlugins } from '../lib/plugin-backup.js';
 import { restorePlugins } from '../lib/plugin-restore.js';
+import { scanWorkspace, backupWorkspace } from '../lib/workspace.js';
 import {
   pnpmAvailable,
   install,
@@ -758,6 +759,34 @@ export default function (app, ctx) {
         appendLog(ctx.dataDir, { action: 'restore.v2', profile, backupRoot, ok: true });
       }
       return c.json({ ok: true, dryRun, results });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // ── 工作区快照：备份 dsh-workspace/ 整个目录（魔改/自研资产库） ──
+  // 扫描工作区（列出顶层条目：目录 + 文件）
+  app.get('/api/v2/workspace/scan', (c) => {
+    const wsDir = c.req.query('wsDir') || path.join(os.homedir(), 'Desktop', 'dsh-workspace');
+    try {
+      const r = scanWorkspace(wsDir);
+      return c.json({ ok: r.ok, ...(r.ok ? { workspaceDir: r.workspaceDir, entries: r.entries } : { error: r.error }) });
+    } catch (e) {
+      return c.json({ ok: false, error: e.message }, 500);
+    }
+  });
+
+  // 备份整个工作区 → <dataDir>/backups-v2/workspace/<timestamp>/
+  app.post('/api/v2/workspace/backup', async (c) => {
+    const { wsDir } = await c.req.json();
+    const ws = wsDir || path.join(os.homedir(), 'Desktop', 'dsh-workspace');
+    try {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const backupRoot = path.join(ctx.dataDir, 'backups-v2', 'workspace', ts);
+      const r = backupWorkspace(ws, path.join(backupRoot, 'plugins'));
+      if (!r.ok) return c.json({ ok: false, error: r.error }, 400);
+      appendLog(ctx.dataDir, { action: 'backup.workspace', workspaceDir: ws, backupRoot, ok: true, entries: r.results.length });
+      return c.json({ ok: true, backupRoot, results: r.results });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
     }

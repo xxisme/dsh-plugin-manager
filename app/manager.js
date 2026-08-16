@@ -1048,6 +1048,13 @@
         <div style="border-top:1px solid var(--border);padding-top:10px">
           <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">历史 v2 备份：</div>
           <div id="v2-history" style="font-size:12px;max-height:180px;overflow-y:auto">加载中…</div>
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
+            <div style="font-size:11px;color:var(--text-dim)">🛠️ 工作区快照（dsh-workspace/ 魔改资产库）</div>
+            <button class="btn sm" id="btn-v2-ws-backup">💾 备份工作区</button>
+          </div>
+          <div id="v2-ws-result" style="font-size:12px;max-height:180px;overflow-y:auto"></div>
         </div>` : '<div class="empty">请先在左侧选择 profile</div>'}
       </div>
     `;
@@ -1057,6 +1064,8 @@
     if (profName) {
       $('btn-v2-scan').addEventListener('click', () => v2Scan());
       $('btn-v2-backup').addEventListener('click', () => v2Backup());
+      const wsBtn = $('btn-v2-ws-backup');
+      if (wsBtn) wsBtn.addEventListener('click', () => v2WorkspaceBackup());
       loadV2History();
     }
   }
@@ -1144,6 +1153,37 @@
       loadV2History();
       if (STATE.currentProfile) loadPlugins(STATE.currentProfile);
     }
+  }
+
+  // 工作区快照：备份 dsh-workspace/（魔改/自研/zip 资产库）
+  async function v2WorkspaceBackup() {
+    const el = $('v2-ws-result');
+    if (!el) return;
+    el.innerHTML = '<div class="empty">扫描中…</div>';
+    // 先扫描预览
+    const scan = await api('GET', '/api/v2/workspace/scan');
+    if (!scan.ok) { el.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">' + esc(scan.error) + '</div>'; return; }
+    const totalMB = (scan.entries.reduce((a, e) => a + (e.fileCount || 0), 0));
+    el.innerHTML = `
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">
+        📁 ${esc(scan.workspaceDir)} · ${scan.entries.length} 个条目
+      </div>
+      <div style="font-size:11px;line-height:1.8">${scan.entries.map(e =>
+        `· ${esc(e.pkg)} <span style="color:var(--text-faint)">(${e.kind})</span>`).join('<br>')}</div>
+      <button class="btn sm primary" id="btn-v2-ws-confirm" style="margin-top:8px">💾 确认备份整个工作区</button>
+    `;
+    $('btn-v2-ws-confirm').addEventListener('click', async () => {
+      el.innerHTML = '<div class="empty">备份中…（约 30MB，需几秒）</div>';
+      const r = await api('POST', '/api/v2/workspace/backup', {});
+      if (!r.ok) { el.innerHTML = '<div class="empty" style="color:var(--danger,#c0392b)">备份失败：' + esc(r.error) + '</div>'; return; }
+      const ok = r.results.filter(x => x.ok).length;
+      const total = (r.results.reduce((a, x) => a + (x.bytes || 0), 0) / 1024 / 1024).toFixed(1);
+      el.innerHTML = `
+        <div style="font-size:12px">✅ 工作区已备份：${ok}/${r.results.length} 条目，共 ${total}MB</div>
+        <div style="font-size:11px;color:var(--text-dim);word-break:break-all;margin-top:4px">${esc(r.backupRoot)}</div>
+      `;
+      loadV2History();
+    });
   }
 
   // ── 启动 ──────────────────────────────────────────
