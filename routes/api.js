@@ -1252,16 +1252,33 @@ export default function (app, ctx) {
         log: ctx.log,
       });
       const ok = secondJob.exitCode === 0;
+
+      // 真升级判定：对比 update 前后该 pkg 在 lockfile 里的 version（8/17 实测：pnpm update --latest 可能 exit 0 但 version 未变，
+      // 场景为 specifier 不包含 latest，例如 ^0.1.1 不含 0.2.0。
+      // 这种场景不能算“升级成功”否则 UI 误报 tosat 与检查面板不一致）。
+      const { parseLocalVersion } = await import('../lib/updater.js');
+      const versionBefore = parseLocalVersion(lockText, pkg);
+      let versionAfter = versionBefore;
+      try {
+        if (fs.existsSync(lockPath)) {
+          versionAfter = parseLocalVersion(fs.readFileSync(lockPath, 'utf8'), pkg);
+        }
+      } catch (e) { ctx.log?.warn?.('post-update version read failed', e.message); }
+      const upgraded = !!versionBefore && !!versionAfter && versionBefore !== versionAfter;
+
       // 更新成功 → 清掉检查缓存，否则前端重新 check 命中旧缓存仍显示"落后 N"
       if (ok) updateCheckCache.delete(`${dshHome}|${profile}`);
       appendLog(ctx.dataDir, {
         action: 'update', profile, plugin: pkg, ok,
+        upgraded, versionBefore, versionAfter,
         jobId: secondJob.id, exitCode: secondJob.exitCode, durationMs: secondJob.durationMs,
         backupDir, autoApprovedBuilds: autoApproved,
         stderrTail: secondJob.stderr?.slice(-2000), stdoutTail: secondJob.stdout?.slice(-2000),
       });
       return c.json({
         ok, pkg, backupDir, job: secondJob, autoApprovedBuilds: autoApproved,
+        upgraded, versionBefore, versionAfter,
+        // ok=false 时 error 携带实际原因；ok=true 但 upgraded=false 时 error 为 undefined（让前端用专用字段提示）
         error: ok ? undefined : ((secondJob.error && '[spawn error] ' + secondJob.error) || secondJob.stderr?.trim().slice(-500) || `exit ${secondJob.exitCode}`),
       });
     } catch (e) {

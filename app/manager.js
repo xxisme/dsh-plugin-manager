@@ -1761,7 +1761,14 @@
       const r = await api('POST', '/api/updates/apply', { profile: profName, pkg }, { timeoutMs: 30 * 60 * 1000 });
       if (!r.ok) { toast('更新失败：' + (r.error || '未知错误'), 'error'); showUpdateErrorDetail(pkg, r.error || '未知错误', null, null); return; }
       if (r.ok && r.job && r.job.exitCode === 0) {
-        toast(`✅ ${pkg} 已更新`);
+        if (r.upgraded) {
+          // 真升级：versionBefore !== versionAfter
+          toast(`✅ ${pkg} 已更新 ${r.versionBefore} → ${r.versionAfter}`);
+        } else {
+          // pnpm 跑完但 version 未变（specifier 不含 latest：^0.1.1 不含 0.2.0）
+          // 不说“失败”但要明确提示原因，以免与检查面板状态不一致
+          toast(`${pkg} 未升级（version 未变：${r.versionBefore || '?'} → ${r.versionAfter || '?'}）—— 最新版可能超出 specifier 范围，详见下方输出`, 'warn');
+        }
         await loadPlugins(profName);
         await loadLogs();
         checkUpdatesUI();
