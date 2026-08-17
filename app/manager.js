@@ -1750,7 +1750,7 @@
 
   // 执行单个插件更新（后台 job）
   async function applyUpdate(pkg, btn) {
-    if (!(await uiConfirm(`更新 ${pkg}？\n\n会先自动备份当前 profile，然后执行 dsh plugin update ${pkg}。\n更新可能改变插件行为——建议先确认上游改动。`))) return;
+    if (!(await uiConfirm(`更新 ${pkg}？\n\n会先备份当前 profile（可反悔），然后升到 npm registry latest。\nGitHub 源插件会拉上游最新 commit。\n更新可能改变插件行为——建议先确认上游改动。`))) return;
     const profName = STATE.currentProfile;
     if (!profName) return;
     const original = btn.innerHTML;

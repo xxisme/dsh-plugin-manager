@@ -1240,9 +1240,11 @@ export default function (app, ctx) {
         const [owner, repo] = gh[pkg].repo.split('/');
         return { owner, repo };
       })() : null;
-      // npm 源 update 默认仅升 specifier 范围内 transitive，direct dep 需传 `-- --latest` 才跳到 dist-tags.latest
-      // （8/17 实测：不传 --latest 锁文件不变，报“已满足”；传后升到 0.1.4并同步 package.json specifier 为 ^0.1.4）
-      const dshArgs = isNpm ? ['update', pkg, '--', '--latest'] : ['update', pkg];
+      // npm 源「应用商店语义」：点更新 = 升到 latest dist-tag，不受 specifier 范围限制。
+      // 实现路径：`dsh plugin add <pkg>@latest`（等价于 `pnpm add <pkg>@latest`，会装到 latest 且自动同步 package.json specifier 为 ^<new>）。
+      // 对比 `dsh plugin update -- --latest`：update 透传 pnpm update --latest，遇到 specifier 不含 latest 时静默不升（8/17 实测）。
+      // GitHub 源保持 `update`（commit 比较语义不变）。
+      const dshArgs = isNpm ? ['add', `${pkg}@latest`] : ['update', pkg];
       const { secondJob, autoApproved } = await autoApprovePnpmBuilds({
         profDir,
         profile,
