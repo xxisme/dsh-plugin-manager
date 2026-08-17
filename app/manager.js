@@ -4,7 +4,7 @@
  * 前端（vanilla JS，零依赖）：
  *  - 状态条 + 操作按钮（刷新/备份）
  *  - 左列：profile 切换
- *  - 右列上半：三个安装入口（zip 文件 / 命令安装：dsh、npx / GitHub URL）
+ *  - 右列上半：两个安装入口（zip 文件 / dsh 命令）
  *  - 右列下半：已安装插件列表
  *  - 底部：实时任务输出（job 输出流）+ 操作日志
  */
@@ -162,7 +162,7 @@
                 📁 本地 zip
               </button>
               <button class="install-tab ${STATE.activeTab === 'cmd' ? 'active' : ''}" data-install-tab="cmd">
-                ⌨️ 命令安装
+                ⌨️ dsh 命令
               </button>
               <button class="install-tab ${STATE.activeTab === 'github' ? 'active' : ''}" data-install-tab="github">
                 ✨ GitHub URL
@@ -265,15 +265,9 @@
 
   function renderCmdPanel() {
     return `
-      <div class="hint-row">
-        从 GitHub / README 复制安装命令，粘贴到下面即可执行。支持两种写法：
-        <code>dsh plugin --profile X add &lt;pkg&gt;</code> 与 <code>npx &lt;pkg&gt;</code>。<br>
-        <span style="color:var(--text-dim)">npx 命令会按 DeepSeek Harness 安装规范<b>归一化为 dsh 安装</b>（由 dsh CLI 写
-        package.json / dsh.profile.bundles / cordis.patch.yml 并跑 pnpm install），装完 DSH 能正常启动。
-        命令里没写 <code>--profile</code> 时，默认用左侧选中的 profile。</span>
-      </div>
+      <div class="hint-row">从 GitHub 复制 dsh 安装命令，粘贴到下面即可执行。注意：只允许 <code>dsh plugin --profile X add/update &lt;pkg&gt;</code> 格式。</div>
       <div class="install-row">
-        <input id="cmd-input" placeholder="dsh plugin --profile web add @nanmicoder/dsh-agent-teams   或   npx @nanmicoder/dsh-agent-teams" spellcheck="false" />
+        <input id="cmd-input" placeholder="dsh plugin --profile web add @nanmicoder/dsh-agent-teams" spellcheck="false" />
       </div>
       <div id="cmd-preview" class="cmd-preview" style="display:none"></div>
       <div class="install-row" style="margin-top:6px">
@@ -312,14 +306,14 @@
   }
 
   function renderPrecheckReport(pc) {
-    // 装前格式检查报告渲染：errors/warnings/info 各自一段
+    // 装前体检报告渲染：errors/warnings/info 各自一段
     const icon = pc.ok ? '✅' : '❌';
-    const status = pc.ok ? '格式检查通过' : '格式检查不通过（已拒绝安装）';const errs = (pc.errors || []).map((e) => `<li style="color:#c0392b">❌ ${esc(e)}</li>`).join('') || '<li style="color:#27ae60">无错误</li>';
+    const status = pc.ok ? '体检通过' : '体检不通过（已拒绝安装）';
+    const errs = (pc.errors || []).map((e) => `<li style="color:#c0392b">❌ ${esc(e)}</li>`).join('') || '<li style="color:#27ae60">无错误</li>';
     const warns = (pc.warnings || []).map((w) => `<li style="color:#b8860b">⚠️ ${esc(w)}</li>`).join('') || '<li style="color:#666">无警告</li>';
     const infos = (pc.info || []).map((i) => `<li style="color:var(--text-dim);font-size:11px">${esc(i)}</li>`).join('') || '<li style="color:#666">无</li>';
     return `<div style="background:var(--bg-info,rgba(0,0,0,.04));padding:14px;border-radius:6px">
-      <div style="font-weight:600;font-size:14px;margin-bottom:4px">${icon} ${status}${pc.pluginName ? `（${esc(pc.pluginName)}）` : ''}</div>
-      <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">只校验包结构与 DSH bundle 必需字段（package.json / cordis.patch.yml / main 产物），<b>不做安全扫描</b></div>
+      <div style="font-weight:600;font-size:14px;margin-bottom:8px">${icon} ${status}${pc.pluginName ? `（${esc(pc.pluginName)}）` : ''}</div>
       <div style="margin-bottom:8px"><b style="color:#c0392b">错误：</b><ul style="margin:4px 0 0 18px;padding:0">${errs}</ul></div>
       <div style="margin-bottom:8px"><b style="color:#b8860b">警告：</b><ul style="margin:4px 0 0 18px;padding:0">${warns}</ul></div>
       <div><b style="color:var(--text-dim)">信息：</b><ul style="margin:4px 0 0 18px;padding:0">${infos}</ul></div>
@@ -407,35 +401,6 @@
     };
   }
 
-  // 包名探测结果行（2026-08-17 review 重定义）：探测现在**不参与放行决策**，
-  // 只在预览里展示供人参考。“是否是插件”这种判断交给用户去根据信号自己看，不代替他决定。
-  function renderProbeRow(probe) {
-    if (!probe) return '';
-    const style = {
-      'dsh-plugin': { color: '#27ae60', icon: 'ℹ️', label: '元数据自称是 DSH 插件（发布者可自行声明，不构成安全保证）' },
-      unknown: { color: '#b8860b', icon: 'ℹ️', label: '看不出 DSH 插件特征' },
-      'not-found': { color: 'var(--text-dim)', icon: 'ℹ️', label: 'registry 上查不到这个包（可能是私有源 / 未登录）' },
-      'probe-failed': { color: 'var(--text-dim)', icon: '⚠️', label: '探测失败（超时/网络）' },
-      skipped: { color: 'var(--text-dim)', icon: '➖', label: '非 npm 源，跳过探测' },
-    }[probe.verdict] || { color: 'var(--text-dim)', icon: '•', label: String(probe.verdict || '') };
-
-    const detail = [];
-    if (probe.version) detail.push(`版本 ${esc(probe.version)}`);
-    // description 是包作者完全可控的文本，截断到 80 字 + 来源标注，避免被人塞“官方已验证插件”诱骗点击
-    if (probe.description) detail.push(`包描述（来源不受信任）: ${esc(probe.description.slice(0, 80))}${probe.description.length > 80 ? '…' : ''}`);
-    for (const s of probe.signals || []) detail.push('依据：' + esc(s));
-    for (const w of probe.weak || []) detail.push('备注：' + esc(w));
-    if (probe.error) detail.push(esc(probe.error));
-    if (probe.rangeDowngraded) detail.push('（semver range 已降级为 latest 查询）');
-
-    return `
-      <div class="cmd-preview-row" style="display:block;color:${style.color}">
-        <span class="cmd-key">包探测</span>
-        <span class="cmd-val">${style.icon} ${style.label}</span>
-        ${detail.length ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px">${detail.join('<br>')}</div>` : ''}
-      </div>`;
-  }
-
   function bindCmdPanel() {
     const input = $('cmd-input');
     const parseBtn = $('cmd-parse-btn');
@@ -444,21 +409,10 @@
       $('cmd-current-profile').textContent = STATE.currentProfile;
     }
 
-    // 输入变化就作废旧预览：
-    // 预览里的「实际执行 / 包探测」是针对旧命令的，留着会让人对着 A 的报告按下 B 的安装。
-    // （后端会重新解析 + 重新探测，所以不会真装错；但 UI 不能说谎。）
-    input.addEventListener('input', () => {
-      delete executeBtn.dataset.parsed;
-      executeBtn.disabled = true;
-      const preview = $('cmd-preview');
-      if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }
-    });
-
     parseBtn.addEventListener('click', async () => {
       const command = input.value.trim();
-      if (!command) { toast('请粘贴 dsh / npx 安装命令', 'warn'); return; }
-      // 带上当前 profile：npx 命令里通常没有 --profile，后端需要它做兜底
-      const r = await api('POST', '/api/parse-cmd', { command, profile: STATE.currentProfile });
+      if (!command) { toast('请粘贴 dsh plugin 命令', 'warn'); return; }
+      const r = await api('POST', '/api/parse-cmd', { command });
       const preview = $('cmd-preview');
       preview.style.display = 'block';
       if (!r.ok) {
@@ -467,38 +421,13 @@
         return;
       }
       const p = r.parsed;
-      // 命令形式标签：让用户一眼看出 npx 被归一化成了 dsh 安装
-      const kindLabel = {
-        dsh: 'dsh 原生命令',
-        'npx-dsh': 'npx 包装的 dsh 命令（已剥壳）',
-        // npx 包名（2026-08-17 review 语义说明）——不是“叫 dsh 名字的包才走”而是 “npx-pkg 默认不一致”。
-      //   备注里要明说「npx → dsh add 不是等价」，避免用户以为我们是在帮他反伪造。
-      'npx-pkg': 'npx 包名（转译；npx→dsh 不是等价操作）',
-      }[p.kind] || p.kind || '-';
-      const profileHint = p.profileSource === 'ui'
-        ? '<span style="font-size:10px;color:var(--text-faint)">（命令未指定，取左侧选中）</span>'
-        : '';
-      const warnRows = (p.warnings || []).map((w) =>
-        `<div class="cmd-preview-row" style="color:#b8860b">⚠️ ${esc(w)}</div>`).join('');
-      const noteRow = p.note
-        ? `<div class="cmd-preview-row" style="font-size:11px;color:var(--text-dim);display:block">ℹ️ ${esc(p.note)}</div>`
-        : '';
-      // 包名探测结果（只有 npx-pkg 转译路径会有）：三态展示，不拿布尔值骗人
-      const probeRow = renderProbeRow(p.probe);
       preview.innerHTML = `
-        <div class="cmd-preview-row"><span class="cmd-key">形式</span><span class="cmd-val">${esc(kindLabel)}</span></div>
-        <div class="cmd-preview-row"><span class="cmd-key">profile</span><span class="cmd-val">${esc(p.profile)} ${profileHint}</span></div>
+        <div class="cmd-preview-row"><span class="cmd-key">profile</span><span class="cmd-val">${esc(p.profile)}</span></div>
         <div class="cmd-preview-row"><span class="cmd-key">action</span><span class="cmd-val">${esc(p.action)}</span></div>
         <div class="cmd-preview-row"><span class="cmd-key">package</span><span class="cmd-val"><code>${esc(p.package)}</code></span></div>
-        <div class="cmd-preview-row"><span class="cmd-key">实际执行</span><span class="cmd-val"><code>${esc(p.resolvedCommand || '')}</code></span></div>
-        ${probeRow}
-        ${warnRows}
-        ${noteRow}
       `;
-      // npx-pkg 默认带 needsNpxTransConfirm，探测不再决定是否点得动按钮。
       executeBtn.disabled = false;
-      // 记下这份预览对应哪条命令，执行时比对，避免拿旧预览描述新命令
-      executeBtn.dataset.parsed = JSON.stringify({ ...p, sourceCommand: command });
+      executeBtn.dataset.parsed = JSON.stringify(p);
     });
 
     executeBtn.addEventListener('click', submitCmdInstall);
@@ -738,16 +667,16 @@
         force,
       });
 
-      // 格式检查不通过 → 在原位显示格式检查报告，不进入安装流程（不显示执行输出框/进度条）
+      // 体检不通过 → 在原位显示体检报告，不进入安装流程（不显示执行输出框/进度条）
       if (!r.ok && r.precheck) {
         if (zipResult) zipResult.innerHTML = renderPrecheckReport(r.precheck);
-        toast('格式检查不通过：' + r.error, 'error');
+        toast('体检不通过：' + r.error, 'error');
         btn.disabled = false;
         btn.innerHTML = '📦 安装';
         return;
       }
 
-      // 格式检查通过或无 precheck 字段 → 走安装流程
+      // 体检通过或无 precheck 字段 → 走安装流程
       showOutput({
         id: 'pending', status: 'running',
         stdout: `⏳ 准备安装 ${zipPath}\n   profile: ${STATE.currentProfile}\n\n`, stderr: '',
@@ -765,7 +694,7 @@
       }
 
       if (r.ok) {
-        // 如果格式检查有 warnings（非阻塞）， 在原位报告区提示
+        // 如果体检有 warnings（非阻塞）， 在原位报告区提示
         if (r.precheckWarnings && r.precheckWarnings.length) {
           if (zipResult) zipResult.innerHTML = `<div style="background:rgba(255,193,7,.12);border-left:3px solid #b8860b;padding:10px;border-radius:4px;font-size:12px"><b>⚠️ 安装成功但有 ${r.precheckWarnings.length} 个警告：</b><ul style="margin:6px 0 0 18px">${r.precheckWarnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>`;
           toast(`⚠️ 安装成功但有 ${r.precheckWarnings.length} 个警告，请查看下方`, 'warn');
@@ -786,64 +715,22 @@
 
   async function submitCmdInstall() {
     const command = $('cmd-input').value.trim();
-    if (!command) { toast('请粘贴 dsh / npx 安装命令', 'warn'); return; }
+    if (!command) { toast('请粘贴 dsh plugin 命令', 'warn'); return; }
 
     const btn = $('cmd-execute-btn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> 执行中…';
 
-    // 预览阶段解析出的实际命令（npx 会被转译），写进输出头部便于事后回溯。
-    // 只有当预览对应的命令跟当前输入框一致时才用（input 事件会清掉 dataset，这里是双保险）
-    let resolvedHint = '';
-    try {
-      const p = btn.dataset.parsed ? JSON.parse(btn.dataset.parsed) : null;
-      if (p && p.sourceCommand === command && p.resolvedCommand && p.resolvedCommand !== command) {
-        resolvedHint = `   归一化为: ${p.resolvedCommand}\n`;
-      }
-    } catch { /* 预览数据坏了不影响执行 */ }
-
     try {
       showOutput({
         id: 'pending', status: 'running',
-        stdout: `⏳ 执行命令:\n   ${command}\n${resolvedHint}\n`, stderr: '',
+        stdout: `⏳ 执行命令:\n   ${command}\n\n`, stderr: '',
       });
 
-      // 装包可能要跑很久（pnpm install + build script），跟 github 安装路径一样给 30min
-      let r = await api('POST', '/api/install/cmd', {
+      const r = await api('POST', '/api/install/cmd', {
         profile: STATE.currentProfile,
         command,
-      }, { timeoutMs: 30 * 60 * 1000 });
-
-      // npx-pkg 的“默认拒绝”提示（2026-08-17 review）：语义不一致是 npx-pkg 的本质问题，
-      // 探测是否翻到「是 DSH 插件」都不能抹平这一点。所以一律弹这个框，
-      // 用户要走就说“我知道这不是等价操作”——
-      // 原來跳个「是否是插件」的框，用户根本答不上来。
-      if (!r.ok && r.needsNpxTransConfirm) {
-        const verdictHint = r.probe
-          ? `包探测参考：${r.probe.verdict}${r.probe.signals?.length ? '（' + r.probe.signals[0] + '）' : ''}`
-          : '';
-        const lines = [
-          'npx 命令与 dsh add 不是等价操作。',
-          'npx 是「运行这个包」；转译后是「把这个包装成依赖」——两者在意义上不是同一件事，探测不能抹平这个鸿沟。',
-          '',
-          verdictHint,
-          '',
-          '如果你确实想装这个包为 DSH 依赖，直接用 dsh 原生命令（更准确）：',
-          r.dshEquivalent || '',
-          '',
-          '仍要按 npx 转译装？（请确认你明白这不是等价操作）',
-        ].filter((x) => x !== '');
-        if (!(await uiConfirm(lines.join('\n')))) {
-          showOutput({ id: 'canceled', status: 'done', stdout: '已取消（npx 转译未确认）\n', stderr: '' });
-          toast('已取消安装', 'warn');
-          return;
-        }
-        r = await api('POST', '/api/install/cmd', {
-          profile: STATE.currentProfile,
-          command,
-          confirmNpxTrans: true,
-        }, { timeoutMs: 30 * 60 * 1000 });
-      }
+      });
 
       if (r.job && r.job.id) {
         showOutput(r.job);
@@ -853,16 +740,6 @@
       }
 
       if (r.ok) {
-        // warnings 不走 toast（2026-08-17 review 修）：
-        // 同一个 DOM 节点同步连发只有最后一条能被人眼看到。
-        // 干托话「原命令里 install 被丢弃」这种关键告知会被自己吃掉。
-        // 这里改成推到 showOutput 区里常驻。
-        if (r.warnings && r.warnings.length) {
-          const warnBlock = r.warnings.map((w) => '⚠️ ' + w).join('\n');
-          const log = $('output-log');
-          if (log) log.textContent = (log.textContent || '') + '\n' + warnBlock + '\n';
-        }
-        if (r.probeSummary) toast(r.probeSummary, r.probe?.verdict === 'dsh-plugin' ? 'info' : 'warn');
         toast(`✅ ${r.action} ${r.package} 完成`);
         await loadPlugins(STATE.currentProfile);
         await loadLogs();
@@ -1882,32 +1759,9 @@
     try {
       // update 是后台 job（pnpm install + pnpm reload），耗时长。用 30min 超时避免 10s 默认超时误报"更新异常"。
       const r = await api('POST', '/api/updates/apply', { profile: profName, pkg }, { timeoutMs: 30 * 60 * 1000 });
-      if (!r.ok) {
-        // lockfile 未变这类“应该是成功但不是”的详细原因—在 toast 里突出报告。
-        const hint = r.lockfileChanged === false
-          ? '（dsh 退出 0 但 lockfile 未变）'
-          : '';
-        toast(`更新失败${hint}：${r.error || '未知错误'}`, 'error');
-        // 修：之前传 null/null 会让用户看不到 dsh 实际输出，只能看到 toast 里 500 字符的摘要。
-        // 那段 pnpm 10 的 onlyBuiltDependencies WARN 就是被这么吞掉的——
-        // 真正的错误信息可能被叠在后几行 stdout/stderr 里。
-        // 截到最后 5000 字符（pnpm 输出可能上万行，足够诊断且不云页）。
-        const tail = (s) => s && s.length > 5000 ? '...（前文省略）...\n' + s.slice(-5000) : (s || '');
-        showUpdateErrorDetail(
-          pkg,
-          r.error || '未知错误',
-          tail(r.job?.stderr),
-          tail(r.job?.stdout),
-        );
-        return;
-      }
+      if (!r.ok) { toast('更新失败：' + (r.error || '未知错误'), 'error'); showUpdateErrorDetail(pkg, r.error || '未知错误', null, null); return; }
       if (r.ok && r.job && r.job.exitCode === 0) {
-        if (r.lockfileChanged === false) {
-          // 后端明确报告 lockfile 未变（这是 2026-08-17 修补后的额外信息）。
-          toast(`${pkg} 未更新（lockfile 未变）`, 'warn');
-        } else {
-          toast(`✅ ${pkg} 已更新（lockfile 已变）`);
-        }
+        toast(`✅ ${pkg} 已更新`);
         await loadPlugins(profName);
         await loadLogs();
         checkUpdatesUI();

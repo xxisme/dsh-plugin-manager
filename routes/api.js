@@ -60,11 +60,7 @@ import {
 } from '../lib/pnpm-runner.js';
 import { extractAndInspect } from '../lib/zip-extractor.js';
 import { appendLog, readRecentLogs } from '../lib/operation-log.js';
-import { runDsh, runNpx, getJob, parseInstallCommand, resolveDshCmd, resolveNpxCmd } from '../lib/cmd-runner.js';
-import { probeDshPackage, probeSummary } from '../lib/pkg-probe.js';
-// getConfig 读插件配置（registry 镜像）。它走 plugin-context 单例，
-// 内部自带 env + fallback 兜底，即使 onload 未注入也不会抛错。
-import { getConfig } from '../lib/plugin-context.js';
+import { runDsh, getJob, parseDshCommand, resolveDshCmd } from '../lib/cmd-runner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.dirname(__dirname);
@@ -388,16 +384,15 @@ export default function (app, ctx) {
   });
 
   // DEBUG: 探针 ctx.dataDir + backups 解析详情
-  // 之前这里写的是 const fs2 = require('node:fs'); const path2 = require('node:path');
-  // —— 但这是 ESM 模块（全文 import），require 未定义，路由一调必 ReferenceError 500。
-  // 文件顶部已经 import fs 和 path，直接复用就行。二次引入是手抖。
   app.get('/api/debug/data-dir', (c) => {
+    const fs2 = require('node:fs');
+    const path2 = require('node:path');
     const dataDir = ctx.dataDir;
-    const backupRoot = dataDir ? path.join(dataDir, 'backups') : null;
-    const exists = backupRoot ? fs.existsSync(backupRoot) : null;
+    const backupRoot = dataDir ? path2.join(dataDir, 'backups') : null;
+    const exists = backupRoot ? fs2.existsSync(backupRoot) : null;
     let entries = null;
     if (exists) {
-      try { entries = fs.readdirSync(backupRoot); } catch (e) { entries = `ERR: ${e.message}`; }
+      try { entries = fs2.readdirSync(backupRoot); } catch (e) { entries = `ERR: ${e.message}`; }
     }
     return c.json({
       ctxKeys: Object.keys(ctx),
@@ -410,35 +405,11 @@ export default function (app, ctx) {
   });
 
   // 解析用户命令（dry-run 预览用，不实际执行）
-  // profile 是「兜底 profile」：命令里没写 --profile 时用 UI 当前选中的（npx 形式几乎都没写）
   app.post('/api/parse-cmd', async (c) => {
-    const { command, profile } = await c.req.json();
-    const parsed = parseInstallCommand(command, { fallbackProfile: profile || null });
+    const { command } = await c.req.json();
+    const parsed = parseDshCommand(command);
     if (!parsed.ok) return c.json({ ok: false, error: parsed.error }, 400);
-
-    // 只对 npx-pkg（我们做了语义转译的那条路径）探测包元数据。
-    // dsh 原生命令是用户原样输入的，不该额外拦；npx-dsh 剥壳后语义与原命令一致，同理。
-    let probe = null;
-    if (parsed.kind === 'npx-pkg') {
-      const dshHome = currentDshHome();
-      probe = await probeDshPackage(parsed.package, {
-        // 探测源必须 == 安装源：传 profile 目录让它按 .npmrc 层级解析实际 registry。
-        // 插件配置里的 registry 只在用户显式填了时作为覆盖（默认为空 = 跟随系统）。
-        registry: getConfig('registry', '') || null,
-        cwd: dshHome && parsed.profile ? profileDirOf(dshHome, parsed.profile) : undefined,
-      });
-    }
-
-    // 预览里给出「实际会执行的命令」，让用户在点执行前就能看到 npx 被转译成了什么
-    return c.json({
-      ok: true,
-      parsed: {
-        ...parsed,
-        resolvedCommand: `dsh ${parsed.fullArgs.join(' ')}`,
-        probe,
-        probeSummary: probe ? probeSummary(probe) : null,
-      },
-    });
+    return c.json({ ok: true, parsed });
   });
 
   // ─── 安装本地 zip：解压 + dsh plugin add link: ───
@@ -458,7 +429,7 @@ export default function (app, ctx) {
       // 1) 备份当前 profile（backupDir 声明在 try 外，避免 backupProfile 抛错时外层 catch 引用 TDZ）
       backupDir = autoBackup(ctx.dataDir, dshHome, profile);
 
-      // 2) 装前格式检查——避免装上后 dsh web 启动失败
+      // 2) 装前体检——避免装上后 dsh web 启动失败
       const check = checkZipReady(zipPath);
       try {
         // 写入操作日志
@@ -469,11 +440,11 @@ export default function (app, ctx) {
         });
       } catch { /* 日志失败不影响主流程 */ }
       if (!check.ok) {
-        // 格式检查不通过：清理临时目录 + 给出详细报告
+        // 体检不通过：清理临时目录 + 给出详细报告
         try { check.cleanup(); } catch {}
         return c.json({
           ok: false,
-          error: 'zip 格式检查不通过：' + check.errors.join('；'),
+          error: 'zip 体检不通过：' + check.errors.join('；'),
           precheck: {
             ok: false,
             errors: check.errors,
@@ -484,7 +455,7 @@ export default function (app, ctx) {
           },
         }, 400);
       }
-      // 格式检查通过：warnings 收集起来给前端展示
+      // 体检通过：warnings 收集起来给前端展示
       const precheckWarnings = check.warnings;
 
       // 3) 解压到 profiles/<name>/external/<plugin>/
@@ -549,7 +520,7 @@ export default function (app, ctx) {
       if (destDir !== finalDir && fs.existsSync(destDir)) {
         try { fs.rmSync(destDir, { recursive: true, force: true }); } catch { /* ignore */ }
       }
-      // 格式检查清理（检验报告后中间文件不需要了）
+      // 体检清理（检验报告后中间文件不需要了）
       try { check.cleanup(); } catch { /* ignore */ }
 
       // 3) 调 dsh plugin add link:<path>（让 dsh 自己处理 package.json + cordis + pnpm install）
@@ -582,7 +553,7 @@ export default function (app, ctx) {
         backupDir,
         job,
         metadata,
-        precheckWarnings, //  格式检查通过但有 warnings（给前端提示用）
+        precheckWarnings, //  体检通过但有 warnings（给前端提示用）
         restoreHint: ok ? null : (backupDir ? `已自动备份到 ${backupDir}，可在「备份」里恢复` : null),
         // 失败时把真实错误信息带回去：spawn 错误（job.error）> stderr > stdout > exitCode
         error: ok ? undefined : (
@@ -689,26 +660,18 @@ export default function (app, ctx) {
     }
   });
 
-  // ─── 执行用户给的安装命令（dsh / npx 两种形式） ───
-  //
-  // npx 形式的处理原则（2026-08-17）：一律归一化到 dsh CLI 执行，不原样跑 npx。
-  //   - `npx dsh plugin ... add X`  → 剥掉 npx 外壳，用本地 dsh 跑（本地没 dsh 才退化真跑 npx）
-  //   - `npx @scope/pkg`            → 转译成 `dsh plugin --profile <UI> add @scope/pkg`
-  // 为什么：DSH 的安装规范（package.json.dependencies + dsh.profile.bundles +
-  // cordis.patch.yml + pnpm install）只有 dsh CLI 写得全。原样跑任意 npx 包既写不对这些文件
-  // （装完 DeepSeek Harness 起不来），又等于开了任意代码执行的口子。
+  // ─── 执行用户给的 dsh plugin 命令 ───
   app.post('/api/install/cmd', async (c) => {
-    const { profile, command, confirmUnknown, confirmNpxTrans } = await c.req.json();
+    const { profile, command } = await c.req.json();
     const dshHome = currentDshHome();
     if (!dshHome) return c.json({ ok: false, error: 'DSH_HOME 未配置' }, 400);
 
-    // 解析 + 白名单验证（profile 作为兜底：npx 命令通常不带 --profile）
-    const parsed = parseInstallCommand(command, { fallbackProfile: profile || null });
+    // 解析 + 白名单验证
+    const parsed = parseDshCommand(command);
     if (!parsed.ok) return c.json({ ok: false, error: parsed.error }, 400);
 
-    // profile 一致性校验：只有命令里显式写了 --profile 才比对，
-    // 兜底来源（profileSource==='ui'）本来就等于 UI 选择，不需要比
-    if (profile && parsed.profileSource === 'command' && profile !== parsed.profile) {
+    // profile 一致性校验（如果前端传了 profile，跟命令里的必须一致）
+    if (profile && profile !== parsed.profile) {
       return c.json({
         ok: false,
         error: `命令中的 --profile ${parsed.profile} 与 UI 选择不一致`,
@@ -727,79 +690,12 @@ export default function (app, ctx) {
       return c.json({ ok: false, error: `profile 不存在: ${parsed.profile}` }, 400);
     }
 
-    // 包名探测（只对 npx-pkg 转译路径）—— 后端也要探一次，不能只依赖前端预览：
-    // 直接打 API 就能绕过 UI。探测带 60s 缓存，预览刚查过的这里不会再打网络。
-    //
-    // ⚠️ 探测的角色重定义（2026-08-17 review）：
-    //   探测**不再参与放行决策**。它是发包者自填字段，伪造成本≈0，
-    //   fail-open 绕过成本也≈0，问用户"是不是 DSH 插件"等于问他答不上来的问题。
-    //   所以：unknown / not-found 都不再走 409，而是统一走「npx-pkg 语义不一致」的提示，
-    //   要求 confirmNpxTrans（用户明确说：我知道这不是等价操作）。true dsh-plugin 也照样
-    //   弹这个提示，因为 npx → dsh add 这层语义转换**本身**就不等价，无论包是不是真插件。
-    let probe = null;
-    if (parsed.kind === 'npx-pkg') {
-      probe = await probeDshPackage(parsed.package, {
-        registry: getConfig('registry', '') || null,
-        cwd: profileDirOf(dshHome, parsed.profile),
-      });
-    }
-    if (parsed.kind === 'npx-pkg' && !confirmNpxTrans) {
-      // 等价 dsh 命令直接拼出来，让用户复制。
-      // 不拦截 known-dsh-plugin：探测虽然显示「是」但 npx → dsh add 这层语义鸿沟仍存在。
-      const dshEquivalent = `dsh plugin --profile ${parsed.profile} add ${parsed.package}`;
-      return c.json({
-        ok: false,
-        needsNpxTransConfirm: true,
-        probe,
-        probeSummary: probe ? probeSummary(probe) : null,
-        dshEquivalent,
-        error: `npx → dsh add 不是等价操作（npx 是执行命令，转译后是装依赖）。确认继续请带 confirmNpxTrans: true。等价的 dsh 命令：\n  ${dshEquivalent}`,
-      }, 409);
-    }
-
     try {
       // 备份当前 profile
       const backupDir = autoBackup(ctx.dataDir, dshHome, parsed.profile);
 
       const profDir = profileDirOf(dshHome, parsed.profile);
-      // dsh plugin 子命令参数（去掉 'plugin' '--profile' '<name>' 前三段）
-      const dshArgs = parsed.fullArgs.slice(3);
-      const pkgSpec = dshArgs[dshArgs.length - 1];
-
-      // github: 源要给 pnpm allowBuilds 写仓库通配 key，npm 源写纯包名 key
-      let repo = null;
-      if (typeof pkgSpec === 'string' && pkgSpec.startsWith('github:')) {
-        const m = pkgSpec.match(/^github:([^/]+)\/([^#]+)/);
-        if (m) repo = { owner: m[1], repo: m[2].replace(/\.git$/, '') };
-      }
-
-      let job;
-      let autoApproved = false;
-      let runner = 'dsh';
-
-      const localDsh = resolveDshCmd();
-      if (parsed.kind === 'npx-dsh' && !localDsh) {
-        // 退化路径：本地没装 dsh，才真的 spawn npx 去拉官方 CLI。
-        // 这里不做 pnpm allowBuilds 自动批准 —— npx 拉的 CLI 版本不确定，重试语义不可控，
-        // 失败时由前端提示用户「装个全局 dsh 再试」。
-        runner = 'npx';
-        if (!resolveNpxCmd()) {
-          return c.json({ ok: false, error: '本地既没有 dsh 也没有 npx，请先安装 Node.js 或全局安装 dsh' }, 400);
-        }
-        job = await runNpx(parsed.npxArgs, { cwd: profDir });
-      } else {
-        // 主路径：本地 dsh 执行，附带 pnpm 10+ build script 自动批准 + 重试
-        const r = await autoApprovePnpmBuilds({
-          profDir,
-          profile: parsed.profile,
-          dshArgs,
-          pkg: pkgSpec,
-          repo,
-          log: ctx.log,
-        });
-        job = r.secondJob;
-        autoApproved = r.autoApproved;
-      }
+      const job = await runDsh(parsed.fullArgs, { cwd: profDir });
 
       const ok = job.exitCode === 0;
       appendLog(ctx.dataDir, {
@@ -807,16 +703,11 @@ export default function (app, ctx) {
         profile: parsed.profile,
         plugin: parsed.package,
         command,
-        kind: parsed.kind,
-        runner,
-        resolvedCommand: `dsh ${parsed.fullArgs.join(' ')}`,
-        probe: probe ? probe.verdict : null,
         ok,
         jobId: job.id,
         exitCode: job.exitCode,
         durationMs: job.durationMs,
         backupDir,
-        autoApprovedBuilds: autoApproved,
         stdoutTail: job.stdout.slice(-800),
         stderrTail: job.stderr.slice(-800),
       });
@@ -826,15 +717,7 @@ export default function (app, ctx) {
         profile: parsed.profile,
         package: parsed.package,
         action: parsed.action,
-        kind: parsed.kind,
-        runner,
-        resolvedCommand: `dsh ${parsed.fullArgs.join(' ')}`,
-        probe,
-        probeSummary: probe ? probeSummary(probe) : null,
-        warnings: parsed.warnings || [],
-        note: parsed.note,
         backupDir,
-        autoApprovedBuilds: autoApproved,
         job,
         // 失败时把真实错误信息带回去：spawn 错误（job.error）> stderr > stdout > exitCode
         error: ok ? undefined : (
@@ -1351,14 +1234,6 @@ export default function (app, ctx) {
 
       const backupDir = autoBackup(ctx.dataDir, dshHome, profile);
       const profDir = profileDirOf(dshHome, profile);
-
-      // 记录 lockfile importers 段哈希（2026-08-17 修）：spawn exit 0 不等于 lockfile 改了。
-      // dsh plugin update 可能因为某些原因（pnpm 缓存、semver 范围不命中、dsh 子命令 bug）
-      // 退出 0 但 lockfile 未变。用户看到「更新成功」但版本号没变——这是他报告的 bug。
-      // 加 lockfile hash 前后对比才能报出**真实状态**。
-      const { lockfileImportersHash } = await import('../lib/updater.js');
-      const hashBefore = fs.existsSync(lockPath) ? lockfileImportersHash(fs.readFileSync(lockPath, 'utf8')) : null;
-
       // 检测并自动批准 pnpm 10+ 拒绝的 build script（统一逻辑见 lib/pnpm-build-allow.js）
       // github 源传 repo 写仓库通配 key；npm 源不传 repo → 写纯包名 key
       const repo = isGithub ? (() => {
@@ -1373,42 +1248,18 @@ export default function (app, ctx) {
         repo,
         log: ctx.log,
       });
-
-      // 重新读 lockfile，对比 hash
-      let hashAfter = hashBefore;
-      let lockfileChanged = false;
-      try {
-        if (fs.existsSync(lockPath)) {
-          hashAfter = lockfileImportersHash(fs.readFileSync(lockPath, 'utf8'));
-          lockfileChanged = hashBefore !== hashAfter;
-        }
-      } catch (e) { ctx.log?.warn?.('lockfile post-check failed', e.message); }
-
-      // 真正成功的判定：spawn exit 0 **且** lockfile importers 段哈希变了。
-      // 两件事任一不满足都视为更新失败（可能 dsh 子命令无效果，可能 pnpm 缓存重复）。
-      const exitOk = secondJob.exitCode === 0;
-      const ok = exitOk && lockfileChanged;
+      const ok = secondJob.exitCode === 0;
       // 更新成功 → 清掉检查缓存，否则前端重新 check 命中旧缓存仍显示"落后 N"
       if (ok) updateCheckCache.delete(`${dshHome}|${profile}`);
       appendLog(ctx.dataDir, {
         action: 'update', profile, plugin: pkg, ok,
         jobId: secondJob.id, exitCode: secondJob.exitCode, durationMs: secondJob.durationMs,
         backupDir, autoApprovedBuilds: autoApproved,
-        lockfileChanged,
         stderrTail: secondJob.stderr?.slice(-2000), stdoutTail: secondJob.stdout?.slice(-2000),
       });
       return c.json({
         ok, pkg, backupDir, job: secondJob, autoApprovedBuilds: autoApproved,
-        lockfileChanged, hashBefore, hashAfter,
-        // 明确提示用户为什么“成功但版本号没变”：
-        error: ok ? undefined : (
-          (secondJob.error && '[spawn error] ' + secondJob.error) ||
-          (secondJob.stderr && secondJob.stderr.trim().slice(-500)) ||
-          (secondJob.stdout && secondJob.stdout.trim().slice(-500)) ||
-          (exitOk && !lockfileChanged
-            ? 'dsh plugin update 退出 0 但 lockfile 未变（可能是 specifier 已限定到精确版本或 pnpm 命中缓存，请手动跑 pnpm update ' + pkg + ' 验证）'
-            : `exit ${secondJob.exitCode}`)
-        ),
+        error: ok ? undefined : ((secondJob.error && '[spawn error] ' + secondJob.error) || secondJob.stderr?.trim().slice(-500) || `exit ${secondJob.exitCode}`),
       });
     } catch (e) {
       return c.json({ ok: false, error: e.message }, 500);
