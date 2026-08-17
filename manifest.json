@@ -2,8 +2,8 @@
   "manifestVersion": 1,
   "id": "dsh-plugin-manager",
   "name": "DSH 插件管理",
-  "version": "0.1.0",
-  "description": "管理本机 DeepSeek Harness (DSH) 的 profile 插件：支持本地 zip/目录/npm/github 四种来源安装，自动接入 cordis 配置与 pnpm 依赖。",
+  "version": "0.2.1",
+  "description": "管理本机 DeepSeek Harness (DSH) 的 profile 插件：支持本地 zip/目录/npm/github/dsh 命令/npx 命令多种来源安装，自动接入 cordis 配置与 pnpm 依赖。",
   "trust": "full-access",
   "minAppVersion": "0.158.0",
   "author": "码农",
@@ -43,8 +43,9 @@
         },
         "registry": {
           "type": "string",
-          "default": "https://registry.npmmirror.com",
-          "title": "pnpm install 使用的 registry"
+          "default": "",
+          "title": "npm registry 覆盖",
+          "description": "留空（推荐）= 跟随系统 .npmrc，与 dsh/pnpm 实际装包的源保持一致。填了会同时作用于包探测与安装（通过 npm_config_registry 注入），两者不会错位。例：https://registry.npmmirror.com"
         }
       }
     }
