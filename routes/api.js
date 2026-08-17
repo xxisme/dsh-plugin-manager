@@ -1240,10 +1240,13 @@ export default function (app, ctx) {
         const [owner, repo] = gh[pkg].repo.split('/');
         return { owner, repo };
       })() : null;
+      // npm 源 update 默认仅升 specifier 范围内 transitive，direct dep 需传 `-- --latest` 才跳到 dist-tags.latest
+      // （8/17 实测：不传 --latest 锁文件不变，报“已满足”；传后升到 0.1.4并同步 package.json specifier 为 ^0.1.4）
+      const dshArgs = isNpm ? ['update', pkg, '--', '--latest'] : ['update', pkg];
       const { secondJob, autoApproved } = await autoApprovePnpmBuilds({
         profDir,
         profile,
-        dshArgs: ['update', pkg],
+        dshArgs,
         pkg,
         repo,
         log: ctx.log,
