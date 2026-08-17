@@ -1240,11 +1240,34 @@ export default function (app, ctx) {
         const [owner, repo] = gh[pkg].repo.split('/');
         return { owner, repo };
       })() : null;
-      // npm 源「应用商店语义」：点更新 = 升到 latest dist-tag，不受 specifier 范围限制。
-      // 实现路径：`dsh plugin add <pkg>@latest`（等价于 `pnpm add <pkg>@latest`，会装到 latest 且自动同步 package.json specifier 为 ^<new>）。
-      // 对比 `dsh plugin update -- --latest`：update 透传 pnpm update --latest，遇到 specifier 不含 latest 时静默不升（8/17 实测）。
+      // npm 源「应用商店语义」：点更新 = 升到 registry latest，不受 specifier 范围限制。
+      // 实现路径：先查 registry 拿 dist-tags.latest 的精确版本号，再 `dsh plugin add <pkg>@<latestVersion>`。
+      // 为什么不用 @latest alias：`pnpm add <pkg>@latest` 对已装且 spec 范围内（如 ^0.12.2 含 0.12.3）的包静默不升
+      // （8/17 实测 dsh-better-sidebar）。用 @<latestVersion> 精确版本号能跨 spec 升级。
+      // 为什么不用 dsh plugin update -- --latest：update 透传 pnpm update --latest，遇到 spec 不含 latest 时静默不升。
       // GitHub 源保持 `update`（commit 比较语义不变）。
-      const dshArgs = isNpm ? ['add', `${pkg}@latest`] : ['update', pkg];
+      let npmSpec = pkg;
+      if (isNpm) {
+        try {
+          // 直接查 registry dist-tags.latest（不依赖 updater.js 内部未 export 的函数）
+          const enc = pkg.startsWith('@') ? pkg.replace('/', '%2F') : pkg;
+          const rr = await fetch(`https://registry.npmjs.org/${enc}`, {
+            headers: { accept: 'application/vnd.npm.install-v1+json', 'user-agent': 'dsh-plugin-manager' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (rr.ok) {
+            const jj = await rr.json();
+            if (jj['dist-tags']?.latest) npmSpec = `${pkg}@${jj['dist-tags'].latest}`;
+            else npmSpec = `${pkg}@latest`; // fallback
+          } else {
+            npmSpec = `${pkg}@latest`; // fallback
+          }
+        } catch (e) {
+          ctx.log?.warn?.('npm latest fetch failed', e.message);
+          npmSpec = `${pkg}@latest`;
+        }
+      }
+      const dshArgs = isNpm ? ['add', npmSpec] : ['update', pkg];
       const { secondJob, autoApproved } = await autoApprovePnpmBuilds({
         profDir,
         profile,
