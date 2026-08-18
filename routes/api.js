@@ -42,7 +42,7 @@ import { backupPlugins } from '../lib/plugin-backup.js';
 import { restorePlugins, restorePluginsExec, githubCommitOf } from '../lib/plugin-restore.js';
 import { checkZipReady } from '../lib/plugin-zip-check.js';
 import { analyzeGithubRepo } from '../lib/github-installer.js';
-import { autoApprovePnpmBuilds } from '../lib/pnpm-build-allow.js';
+import { autoApprovePnpmBuilds, migrateLegacyPnpmFields } from '../lib/pnpm-build-allow.js';
 import {
   scanUninstallResidues,
   scanExternalOrphans,
@@ -525,6 +525,20 @@ export default function (app, ctx) {
 
       // 3) 调 dsh plugin add link:<path>（让 dsh 自己处理 package.json + cordis + pnpm install）
       const linkPath = finalDir.replace(/\\/g, '/');
+      // 先迁移 profile 里 package.json 的废弃 pnpm.* 字段，避免 pnpm 发
+      // [WARN] The "pnpm" field in package.json is no longer read by pnpm...，
+      // 并让 onlyBuiltDependencies 等设置真正生效。幂等——无废弃字段时空跑。
+      const migratedZip = migrateLegacyPnpmFields(profDir, { log: ctx.log });
+      if (migratedZip.migrated) {
+        appendLog(ctx.dataDir, {
+          action: 'pnpm-legacy-migrate',
+          profile,
+          profDir,
+          fields: migratedZip.fields,
+          backups: migratedZip.backups,
+          trigger: 'install.zip',
+        });
+      }
       const job = await runDsh(
         ['plugin', '--profile', profile, 'add', `link:${linkPath}`],
         { cwd: profDir }
@@ -637,6 +651,7 @@ export default function (app, ctx) {
         pkg: spec,
         repo,
         log: ctx.log,
+        dataDir: ctx.dataDir,
       });
       const ok = secondJob.exitCode === 0;
       appendLog(ctx.dataDir, {
@@ -1275,6 +1290,7 @@ export default function (app, ctx) {
         pkg,
         repo,
         log: ctx.log,
+        dataDir: ctx.dataDir,
       });
       const ok = secondJob.exitCode === 0;
 
